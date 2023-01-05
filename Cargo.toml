@@ -1,0 +1,16 @@
+[package]
+name = "wl-screenrec"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+image = "0.24.5"
+wayland-client = "0.29.5"
+wayland-protocols = { version = "0.29", features = ["client", "unstable_protocols"] }
+vaapi-sys = { path = "../vaapi-sys" }
+gbm = "0.9.0"
+ffmpeg-next = "5.1.1"
+
