@@ -3,6 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::VecDeque,
     ffi::c_int,
+    io,
     ptr::null_mut,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -10,9 +11,10 @@ use std::{
     },
 };
 
-use clap::{command, Parser};
+use clap::{command, error::ErrorKind, Parser};
+use crossbeam::{channel::bounded, thread};
 use ffmpeg::{
-    codec::{self, Parameters},
+    codec::{self, Parameters, context},
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
@@ -21,12 +23,15 @@ use ffmpeg::{
         AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
-    format::{self, Pixel},
+    format::{self, Pixel, Output},
     frame::{self, video},
     Packet,
 };
 use wayland_client::{
-    protocol::wl_output::{self, WlOutput},
+    protocol::{
+        wl_buffer::WlBuffer,
+        wl_output::{self, WlOutput},
+    },
     Display, Filter, GlobalManager, Interface, Main,
 };
 use wayland_protocols::{
@@ -35,7 +40,8 @@ use wayland_protocols::{
         zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     },
     wlr::unstable::screencopy::v1::client::{
-        zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     },
 };
 
@@ -71,32 +77,27 @@ impl VaSurface {
 struct State {
     dims: Option<(i32, i32)>,
 
-    surfaces_owned_by_compositor: VecDeque<(VaSurface, video::Video)>,
-    surfaces_owned_by_filter: VecDeque<VaSurface>,
+    surfaces_owned_by_compositor: VecDeque<(
+        VaSurface,
+        video::Video,
+        Main<ZwpLinuxBufferParamsV1>,
+        Main<ZwlrScreencopyFrameV1>,
+        Main<WlBuffer>,
+    )>,
     // free_surfaces: Vec<VaSurface>,
 
     // va_dpy: *mut c_void,
     // va_context: u32,
-    enc: ffmpeg_next::encoder::Video,
-    filter: filter::graph::Graph,
-    ost_index: usize,
-    octx: format::context::Output,
     dma: Main<ZwpLinuxDmabufV1>,
     copy_manager: Main<ZwlrScreencopyManagerV1>,
     wl_output: Main<WlOutput>,
     running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
+    frame_send: crossbeam::channel::Sender<VaSurface>,
 }
 
 impl State {
-    fn process_ready(&mut self) {
-        let mut encoded = Packet::empty();
-        while self.enc.receive_packet(&mut encoded).is_ok() {
-            encoded.set_stream(self.ost_index);
-            // rescale?
-            encoded.write_interleaved(&mut self.octx).unwrap();
-        }
-    }
+    fn process_ready(&mut self) {}
     fn queue_copy(&mut self) {
         // let mut surf = self.free_surfaces.pop().unwrap();
         let mut surf = self.frames_rgb.alloc();
@@ -132,38 +133,25 @@ impl State {
                 } => {
                     let state = d.get::<State>().unwrap();
 
-                    let (surf, drop_mapping) =
-                        state.surfaces_owned_by_compositor.pop_front().unwrap();
+                    let (
+                        mut surf,
+                        drop_mapping,
+                        destroy_buffer_params,
+                        destroy_frame,
+                        destroy_buffer,
+                    ) = state.surfaces_owned_by_compositor.pop_front().unwrap();
 
                     drop(drop_mapping);
+                    destroy_buffer_params.destroy();
+                    destroy_frame.destroy();
+                    destroy_buffer.destroy();
 
-                    state
-                        .filter
-                        .get("in")
-                        .unwrap()
-                        .source()
-                        .add(&surf.f)
-                        .unwrap();
+                    let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
+                    let pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
 
-                    state.surfaces_owned_by_filter.push_back(surf);
+                    surf.f.set_pts(Some(pts));
 
-                    let mut yuv_frame = frame::Video::empty();
-                    while state
-                        .filter
-                        .get("out")
-                        .unwrap()
-                        .sink()
-                        .frame(&mut yuv_frame)
-                        .is_ok()
-                    {
-                        // state
-                        //     .free_surfaces
-                        //     .push(state.surfaces_owned_by_filter.pop_front().unwrap());
-                        println!("encoding frame");
-                        state.enc.send_frame(&yuv_frame).unwrap();
-                    }
-
-                    state.process_ready();
+                    state.frame_send.try_send(surf);
                 }
                 _ => {}
             },
@@ -180,10 +168,49 @@ impl State {
 
         out.copy_with_damage(&*buf);
 
-        self.surfaces_owned_by_compositor.push_back((surf, mapping));
+        self.surfaces_owned_by_compositor
+            .push_back((surf, mapping, dma_params, out, buf));
+    }
+}
+
+struct EncState {
+    filter: filter::Graph,
+    enc: encoder::Video,
+    octx: format::context::Output,
+    frame_recv: crossbeam::channel::Receiver<VaSurface>
+}
+
+impl EncState {
+
+    fn process_ready(&mut self) {
+
+            let mut yuv_frame = frame::Video::empty();
+            while self.filter
+                .get("out")
+                .unwrap()
+                .sink()
+                .frame(&mut yuv_frame)
+                .is_ok()
+            {
+                self.enc.send_frame(&yuv_frame).unwrap();
+            }
+
+            let mut encoded = Packet::empty();
+            while self.enc.receive_packet(&mut encoded).is_ok() {
+                encoded.set_stream(0);
+                // rescale?
+                encoded.write_interleaved(&mut self.octx).unwrap();
+            }
     }
 
-    fn eof_flush(&mut self) {
+    fn thread(&mut self) {
+
+        while let Ok(frame) = self.frame_recv.recv() {
+            self.filter.get("in").unwrap().source().add(&frame.f).unwrap();
+
+            self.process_ready();
+        }
+
         self.filter.get("in").unwrap().source().flush().unwrap();
         self.process_ready();
         self.enc.send_eof().unwrap();
@@ -265,7 +292,7 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         &filter::find("buffer").unwrap(),
         "in",
         &format!(
-            "video_size=2840x2160:pix_fmt={}:time_base=1/60",
+            "video_size=2840x2160:pix_fmt={}:time_base=1/1000000",
             AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
         ),
     )
@@ -277,8 +304,8 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         p.width = 3840;
         p.height = 2161;
         p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
-        p.time_base.num = 60;
-        p.time_base.den = 1;
+        p.time_base.num = 1;
+        p.time_base.den = 1_000_000;
         p.hw_frames_ctx = inctx.ptr;
 
         let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
@@ -312,7 +339,7 @@ fn main() {
 
     ffmpeg_next::init().unwrap();
 
-    ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
+    // ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
 
     let args = Args::parse();
 
@@ -372,8 +399,8 @@ fn main() {
         },
     ));
 
-    let mut output = ffmpeg_next::format::output(&"out.mp4").unwrap();
-    let mut ost = output
+    let mut octx = ffmpeg_next::format::output(&"out.mp4").unwrap();
+    let mut ost = octx
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
         .unwrap();
 
@@ -397,7 +424,7 @@ fn main() {
 
     let mut hw_device_ctx = AvHwDevCtx::new_libva();
     let mut frames_rgb = hw_device_ctx
-        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_RGB0)
+        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0)
         .unwrap();
 
     let mut frames_yuv = hw_device_ctx
@@ -410,36 +437,46 @@ fn main() {
         (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
     }
 
-    let g = filter(&frames_rgb);
-    println!("{}", g.dump());
+    let mut filter = filter(&frames_rgb);
+    println!("{}", filter.dump());
 
     ost.set_parameters(&enc);
-    let enc = enc
+    let mut enc = enc
         .open_as_with(
             encoder::find_by_name("h264_vaapi"),
             dict! {
-                // "profile" => "high"
+                // "profile" => "high",
+                "low_power" => "1"
             },
         )
         .unwrap();
 
-    ffmpeg_next::format::context::output::dump(&output, 0, Some(&"out.mp4"));
-    output.write_header().unwrap();
+    ffmpeg_next::format::context::output::dump(&octx, 0, Some(&"out.mp4"));
+    octx.write_header().unwrap();
+
+    let (frame_send, frame_recv) = bounded(10);
 
     let mut state = State {
         dims: None,
         surfaces_owned_by_compositor: VecDeque::new(),
-        surfaces_owned_by_filter: VecDeque::new(),
-        enc,
-        filter: g,
-        ost_index: 0,
-        octx: output,
         dma,
         copy_manager: man,
         wl_output,
         running,
         frames_rgb,
+        frame_send,
     };
+
+    let mut enc_state = EncState {
+        frame_recv,
+        filter,
+        enc,
+        octx,
+    };
+
+    let enc_thread = std::thread::spawn(move || {
+        enc_state.thread();
+    });
 
     eq.sync_roundtrip(&mut state, |a, b, c| println!("{:?} {:?} {:?}", a, b, c))
         .unwrap();
@@ -461,8 +498,12 @@ fn main() {
         while state.surfaces_owned_by_compositor.len() < 5 {
             state.queue_copy();
         }
-        eq.dispatch(&mut state, |_, _, _| ()).unwrap();
+        match eq.dispatch(&mut state, |_, _, _| ()) {
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => panic!("{}", e),
+        }
     }
 
-    state.eof_flush();
+    enc_thread.join();
 }

@@ -13,4 +13,5 @@ wayland-protocols = { version = "0.29", features = ["client", "unstable_protocol
 ffmpeg-next = "5.1.1"
 ctrlc = "3.2.4"
 gbm = "0.11.0"
+crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
 
