@@ -9,7 +9,7 @@ use std::{
         raw::c_void,
     },
     ptr::{null, null_mut},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex}, ffi::c_int,
 };
 
 use clap::{command, Parser};
@@ -18,7 +18,7 @@ use ffmpeg::{
     dict, encoder,
     ffi::{
         av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_create_derived,
-        av_hwframe_get_buffer, AVFrame, AVHWFramesContext, AVPixelFormat,
+        av_hwframe_get_buffer, AVFrame, AVHWFramesContext, AVPixelFormat, av_hwframe_ctx_init, AVBufferRef, av_buffer_ref, av_buffer_unref, AVHWDeviceContext, av_hwframe_map, AV_HWFRAME_MAP_WRITE, AV_HWFRAME_MAP_READ, AVDRMFrameDescriptor,
     },
     format::Pixel,
     frame::video,
@@ -61,6 +61,7 @@ struct VaSurface {
     // va_surface: u32,
     // export: VADRMPRIMESurfaceDescriptor,
     // img: VAImage,
+
     f: video::Video,
 }
 
@@ -70,15 +71,15 @@ struct State {
     free_surfaces: Vec<VaSurface>,
     va_dpy: *mut c_void,
     // va_context: u32,
-    enc: ffmpeg_next::encoder::Video,
+    enc: Option<ffmpeg_next::encoder::Video>,
 }
 
 struct AvHwDevCtx {
-    ptr: *mut ffmpeg::sys::AVHWDeviceContext,
+    ptr: *mut ffmpeg::sys::AVBufferRef,
 }
 
 impl AvHwDevCtx {
-    fn new() -> Self {
+    fn new_libva() -> Self {
         unsafe {
             let mut hw_device_ctx = null_mut();
 
@@ -96,42 +97,70 @@ impl AvHwDevCtx {
             assert_eq!(sts, 0);
 
             Self {
-                ptr: hw_device_ctx as *mut _,
+                ptr: hw_device_ctx
             }
         }
     }
 
+
+    // fn new_drm() -> Self {
+    //     unsafe {
+    //         let mut hw_device_ctx = null_mut();
+
+    //         let opts = dict! {
+    //             "connection_type" => "drm"
+    //         };
+
+    //         let sts = av_hwdevice_ctx_create(
+    //             &mut hw_device_ctx,
+    //             ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
+    //             null_mut(),
+    //             opts.as_mut_ptr(),
+    //             0,
+    //         );
+    //         assert_eq!(sts, 0);
+
+    //         Self {
+    //             ptr: hw_device_ctx
+    //         }
+    //     }
+    // }
+
     fn create_frame_ctx(&mut self, pixfmt: AVPixelFormat) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
-            let hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
+            let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
             let hwframe_casted = (*hwframe).data as *mut AVHWFramesContext;
 
             // ffmpeg does not expose RGB vaapi
             (*hwframe_casted).format = Pixel::VAAPI.into();
             // (*hwframe_casted).sw_format = AVPixelFormat::AV_PIX_FMT_YUV420P;
             (*hwframe_casted).sw_format = pixfmt;
-            (*hwframe_casted).width = 1920;
-            (*hwframe_casted).height = 1080;
+            (*hwframe_casted).width = 3840;
+            (*hwframe_casted).height = 2160;
             (*hwframe_casted).initial_pool_size = 20;
 
-            // (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx;
-            // (*enc.as_mut_ptr()).hw_frames_ctx = hwframe;
-            // (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
-            Ok(AvHwFrameCtx {
-                ptr: hwframe_casted,
-            })
+            let sts = av_hwframe_ctx_init(hwframe);
+            assert_eq!(sts, 0);
+
+            let ret = Ok(AvHwFrameCtx {
+                ptr: av_buffer_ref(hwframe),
+            });
+
+            av_buffer_unref(&mut hwframe);
+
+            ret
         }
     }
 }
 
 struct AvHwFrameCtx {
-    ptr: *mut ffmpeg::sys::AVHWFramesContext,
+    ptr: *mut ffmpeg::sys::AVBufferRef,
 }
 
 impl AvHwFrameCtx {
     fn alloc(&mut self) -> video::Video {
         let mut frame = ffmpeg_next::frame::video::Video::empty();
-        let sts = unsafe { av_hwframe_get_buffer(self.ptr as *mut _, frame.as_mut_ptr(), 0) };
+        let sts = unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) };
         assert_eq!(sts, 0);
 
         frame
@@ -244,7 +273,7 @@ fn main() {
                 // frame.set_format(Pixel::VAAPI);
                 // unsafe { (*frame.as_mut_ptr()).data[3] = surf.va_surface as usize as *mut _ };
 
-                state.enc.send_frame(&surf.f).unwrap();
+                state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
             }
             _ => {}
         },
@@ -295,8 +324,8 @@ fn main() {
 
     enc.set_format(Pixel::VAAPI);
     enc.set_flags(codec::Flags::GLOBAL_HEADER);
-    enc.set_width(1920);
-    enc.set_height(1080);
+    enc.set_width(3840);
+    enc.set_height(2160);
     enc.set_time_base((1, 60));
 
     unsafe {
@@ -326,20 +355,20 @@ fn main() {
         // (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
     }
 
-    let mut hw_device_ctx = AvHwDevCtx::new();
+    let mut hw_device_ctx = AvHwDevCtx::new_libva();
     let mut frames_rgb = hw_device_ctx
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_RGB0)
         .unwrap();
 
-    let mut frames_yuv= hw_device_ctx
-        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_YUV420P)
-        .unwrap();
+    // let mut frames_yuv= hw_device_ctx
+    //     .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_YUV420P)
+    //     .unwrap();
 
-    unsafe {
-        (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-        (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-        (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
-    }
+    // unsafe {
+    //     (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
+    //     (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+    //     (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
+    // }
 
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
@@ -351,14 +380,14 @@ fn main() {
 
     ost.set_parameters(&enc);
 
-    let enc = enc
-        .open_as_with(
-            encoder::find_by_name("h264_vaapi"),
-            dict! {
-                // "profile" => "high"
-            },
-        )
-        .unwrap();
+    // let enc = enc
+    //     .open_as_with(
+    //         encoder::find_by_name("h264_vaapi"),
+    //         dict! {
+    //             // "profile" => "high"
+    //         },
+    //     )
+    //     .unwrap();
 
     let mut state = State {
         dims: None,
@@ -366,7 +395,7 @@ fn main() {
         va_dpy: null_mut(),
         // va_context: 0,
         pending_surfaces: VecDeque::new(),
-        enc,
+        enc: None,
     };
 
     ffmpeg_next::format::context::output::dump(&output, 0, Some(&"out.mp4"));
@@ -432,7 +461,10 @@ fn main() {
         //     .push(unsafe { alloc_va_surface(va_dpy, w, h) });
 
 
-        state.free_surfaces.push(VaSurface { f: frames_rgb.alloc() });
+        let f = frames_rgb.alloc();
+        // let vaSurface = unsafe { (*f.as_ptr()).data[3] as usize as i32 };
+
+        state.free_surfaces.push(VaSurface { f });
         // surfaces.push(state.free_surfaces.last().unwrap().f.clone());
     }
 
@@ -463,18 +495,34 @@ fn main() {
     {
         let surf = state.free_surfaces.pop().unwrap();
 
-        let fd = unsafe { (*surf.f.as_ptr()).data[3] as usize as i32 };
+        let mut dst = video::Video::empty();
+        dst.set_format(Pixel::DRM_PRIME);
 
-        // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
-        // let stride = surf.export.layers[0].pitch[0];
-        // dma_params.add(
-        //     surf.export.objects[0].fd,
-        //     0,
-        //     0,
-        //     stride,
-        //     u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-        //     u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-        // );
+        unsafe {
+            let sts = av_hwframe_map(dst.as_mut_ptr(), surf.f.as_ptr(), AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int);
+            assert_eq!(sts, 0);
+
+            let desc = &*((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor);
+
+            let modifier = desc.objects[0].format_modifier.to_be_bytes();
+            let stride = desc.layers[0].planes[0].pitch as u32;
+            let fd = desc.objects[0].fd;
+
+            // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
+            // let stride = surf.export.layers[0].pitch[0];
+            // let fd =                 surf.export.objects[0].fd;
+            dma_params.add(
+                fd,
+                0,
+                0,
+                stride,
+                u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+                u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+            );
+        }
+
+
+
 
         let buf = dma_params.create_immed(
             w,
