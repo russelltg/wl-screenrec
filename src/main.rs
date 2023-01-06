@@ -2,6 +2,7 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::VecDeque,
+    ffi::c_int,
     fs::File,
     mem::MaybeUninit,
     os::{
@@ -9,7 +10,7 @@ use std::{
         raw::c_void,
     },
     ptr::{null, null_mut},
-    sync::{Arc, Mutex}, ffi::c_int,
+    sync::{Arc, Mutex},
 };
 
 use clap::{command, Parser};
@@ -17,12 +18,15 @@ use ffmpeg::{
     codec::{self, Parameters},
     dict, encoder,
     ffi::{
-        av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_create_derived,
-        av_hwframe_get_buffer, AVFrame, AVHWFramesContext, AVPixelFormat, av_hwframe_ctx_init, AVBufferRef, av_buffer_ref, av_buffer_unref, AVHWDeviceContext, av_hwframe_map, AV_HWFRAME_MAP_WRITE, AV_HWFRAME_MAP_READ, AVDRMFrameDescriptor,
+        av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
+        av_hwframe_ctx_create_derived, av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map,
+        AVBufferRef, AVDRMFrameDescriptor, AVFrame, AVHWDeviceContext, AVHWFramesContext,
+        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_buffersrc_parameters_set, av_buffersrc_parameters_alloc, av_free,
     },
-    format::Pixel,
-    frame::video,
-    Codec,
+    filter,
+    format::{Pixel, self},
+    frame::{video, self},
+    Codec, Packet,
 };
 // use gbm::{BufferObject, BufferObjectFlags, Device};
 use image::{EncodableLayout, ImageBuffer, ImageOutputFormat, Rgba};
@@ -61,7 +65,6 @@ struct VaSurface {
     // va_surface: u32,
     // export: VADRMPRIMESurfaceDescriptor,
     // img: VAImage,
-
     f: video::Video,
 }
 
@@ -69,9 +72,12 @@ struct State {
     dims: Option<(i32, i32)>,
     pending_surfaces: VecDeque<VaSurface>,
     free_surfaces: Vec<VaSurface>,
-    va_dpy: *mut c_void,
+    // va_dpy: *mut c_void,
     // va_context: u32,
-    enc: Option<ffmpeg_next::encoder::Video>,
+    enc: ffmpeg_next::encoder::Video,
+    filter: filter::graph::Graph,
+    ost_index: usize,
+    octx: format::context::Output,
 }
 
 struct AvHwDevCtx {
@@ -96,12 +102,9 @@ impl AvHwDevCtx {
             );
             assert_eq!(sts, 0);
 
-            Self {
-                ptr: hw_device_ctx
-            }
+            Self { ptr: hw_device_ctx }
         }
     }
-
 
     // fn new_drm() -> Self {
     //     unsafe {
@@ -208,8 +211,72 @@ impl AvHwFrameCtx {
 //     }
 // }
 
+fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
+
+    let mut g = ffmpeg::filter::graph::Graph::new();
+    g.add(
+        &filter::find("buffer").unwrap(),
+        "in",
+        &format!(
+            "video_size=2840x2160:pix_fmt={}:time_base=1/60",
+            AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
+        ),
+    )
+    .unwrap();
+
+    unsafe {
+        let p = &mut *av_buffersrc_parameters_alloc();
+
+        p.width = 3840;
+        p.height = 2161;
+        p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
+        p.time_base.num = 60;
+        p.time_base.den = 1;
+        p.hw_frames_ctx = inctx.ptr;
+
+        let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
+        assert_eq!(sts, 0);
+
+        av_free(p as *mut _ as *mut _);
+    }
+
+
+    // g.add(
+    //     &ffmpeg_next::filter::find("scale_vaapi").unwrap(),
+    //     "pixfmt_convert",
+    //     "format=nv12",
+    // )
+    // .unwrap();
+    g.add(&filter::find("buffersink").unwrap(), "out", "")
+        .unwrap();
+
+    let mut out = g.get("out").unwrap();
+    out.set_pixel_format(Pixel::VAAPI);
+
+    // g.output("in", 0)
+    //     .unwrap()
+    //     .input("pixfmt_convert", 0)
+    //     .unwrap();
+    g.output("in", 0)
+        .unwrap()
+        .input("out", 0)
+        .unwrap()
+        .parse("scale_vaapi=format=nv12")
+        .unwrap();
+
+    // g.get("Parsed_scale_vaapi").unwrap().as_mut_ptr();
+    
+
+    g.validate().unwrap();
+
+    g
+
+}
+
 fn main() {
     ffmpeg_next::init().unwrap();
+
+    ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
 
     let args = Args::parse();
 
@@ -273,7 +340,20 @@ fn main() {
                 // frame.set_format(Pixel::VAAPI);
                 // unsafe { (*frame.as_mut_ptr()).data[3] = surf.va_surface as usize as *mut _ };
 
-                state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
+                // state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
+                state.filter.get("in").unwrap().source().add(&surf.f).unwrap();
+
+                let mut yuv_frame = frame::Video::empty();
+                while state.filter.get("out").unwrap().sink().frame(&mut yuv_frame).is_ok() {
+                    state.enc.send_frame(&yuv_frame).unwrap();
+                }
+
+                let mut encoded = Packet::empty();
+                while state.enc.receive_packet(&mut encoded).is_ok() {
+                    encoded.set_stream(state.ost_index);
+                    // rescale?
+                    encoded.write_interleaved(&mut state.octx).unwrap();
+                }
             }
             _ => {}
         },
@@ -360,26 +440,23 @@ fn main() {
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_RGB0)
         .unwrap();
 
-    let mut frames_yuv= hw_device_ctx
-        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_YUV420P)
+    let mut frames_yuv = hw_device_ctx
+        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12)
         .unwrap();
 
     unsafe {
         (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
         (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-        (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
+        (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
     }
 
-    let mut g = ffmpeg::filter::graph::Graph::new();
-    g.add(
-        &ffmpeg_next::filter::find("format").unwrap(),
-        "format",
-        "pix_fmts=yuv420p",
-    )
-    .unwrap();
+    let g = filter(&frames_rgb);
+    println!("{}", g.dump());
+
+    // let mut out = g.get("out").unwrap();
+    // out.set_pixel_format(Pixel::VAAPI);
 
     ost.set_parameters(&enc);
-
     let enc = enc
         .open_as_with(
             encoder::find_by_name("h264_vaapi"),
@@ -389,18 +466,21 @@ fn main() {
         )
         .unwrap();
 
+    ffmpeg_next::format::context::output::dump(&output, 0, Some(&"out.mp4"));
+    output.write_header().unwrap();
+
     let mut state = State {
         dims: None,
         free_surfaces: Vec::new(),
-        va_dpy: null_mut(),
+        // va_dpy: null_mut(),
         // va_context: 0,
         pending_surfaces: VecDeque::new(),
-        enc: None,
+        enc,
+        filter: g,
+        ost_index: 0, // ??
+        octx: output,
     };
 
-    ffmpeg_next::format::context::output::dump(&output, 0, Some(&"out.mp4"));
-
-    output.write_header().unwrap();
 
     eq.sync_roundtrip(&mut state, |a, b, c| println!("{:?} {:?} {:?}", a, b, c))
         .unwrap();
@@ -460,7 +540,6 @@ fn main() {
         //     .free_surfaces
         //     .push(unsafe { alloc_va_surface(va_dpy, w, h) });
 
-
         let f = frames_rgb.alloc();
         // let vaSurface = unsafe { (*f.as_ptr()).data[3] as usize as i32 };
 
@@ -499,7 +578,11 @@ fn main() {
         dst.set_format(Pixel::DRM_PRIME);
 
         unsafe {
-            let sts = av_hwframe_map(dst.as_mut_ptr(), surf.f.as_ptr(), AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int);
+            let sts = av_hwframe_map(
+                dst.as_mut_ptr(),
+                surf.f.as_ptr(),
+                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
+            );
             assert_eq!(sts, 0);
 
             let desc = &*((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor);
@@ -520,9 +603,6 @@ fn main() {
                 u32::from_be_bytes(modifier[4..].try_into().unwrap()),
             );
         }
-
-
-
 
         let buf = dma_params.create_immed(
             w,
