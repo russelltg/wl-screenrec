@@ -360,15 +360,15 @@ fn main() {
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_RGB0)
         .unwrap();
 
-    // let mut frames_yuv= hw_device_ctx
-    //     .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_YUV420P)
-    //     .unwrap();
+    let mut frames_yuv= hw_device_ctx
+        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_YUV420P)
+        .unwrap();
 
-    // unsafe {
-    //     (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-    //     (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-    //     (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
-    // }
+    unsafe {
+        (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
+        (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+        (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
+    }
 
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
@@ -380,14 +380,14 @@ fn main() {
 
     ost.set_parameters(&enc);
 
-    // let enc = enc
-    //     .open_as_with(
-    //         encoder::find_by_name("h264_vaapi"),
-    //         dict! {
-    //             // "profile" => "high"
-    //         },
-    //     )
-    //     .unwrap();
+    let enc = enc
+        .open_as_with(
+            encoder::find_by_name("h264_vaapi"),
+            dict! {
+                // "profile" => "high"
+            },
+        )
+        .unwrap();
 
     let mut state = State {
         dims: None,
