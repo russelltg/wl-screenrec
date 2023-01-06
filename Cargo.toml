@@ -13,4 +13,5 @@ wayland-protocols = { version = "0.29", features = ["client", "unstable_protocol
 vaapi-sys = { path = "../vaapi-sys" }
 gbm = "0.9.0"
 ffmpeg-next = "5.1.1"
+ctrlc = "3.2.4"
 
