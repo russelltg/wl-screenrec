@@ -10,7 +10,10 @@ use std::{
         raw::c_void,
     },
     ptr::{null, null_mut},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use clap::{command, Parser};
@@ -18,14 +21,15 @@ use ffmpeg::{
     codec::{self, Parameters},
     dict, encoder,
     ffi::{
-        av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_create_derived, av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map,
-        AVBufferRef, AVDRMFrameDescriptor, AVFrame, AVHWDeviceContext, AVHWFramesContext,
-        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_buffersrc_parameters_set, av_buffersrc_parameters_alloc, av_free,
+        av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
+        av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_create_derived,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, AVBufferRef,
+        AVDRMFrameDescriptor, AVFrame, AVHWDeviceContext, AVHWFramesContext, AVPixelFormat,
+        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
-    format::{Pixel, self},
-    frame::{video, self},
+    format::{self, Pixel},
+    frame::{self, video},
     Codec, Packet,
 };
 // use gbm::{BufferObject, BufferObjectFlags, Device};
@@ -70,14 +74,146 @@ struct VaSurface {
 
 struct State {
     dims: Option<(i32, i32)>,
-    pending_surfaces: VecDeque<VaSurface>,
+    
+    surfaces_owned_by_compositor: VecDeque<VaSurface>,
+    surfaces_owned_by_filter: VecDeque<VaSurface>,
     free_surfaces: Vec<VaSurface>,
+
+
     // va_dpy: *mut c_void,
     // va_context: u32,
     enc: ffmpeg_next::encoder::Video,
     filter: filter::graph::Graph,
     ost_index: usize,
     octx: format::context::Output,
+    dma_params: Main<ZwpLinuxBufferParamsV1>,
+    copy_manager: Main<ZwlrScreencopyManagerV1>,
+    wl_output: Main<WlOutput>,
+    running: Arc<AtomicBool>,
+}
+
+impl State {
+    fn process_ready(&mut self) {
+        let mut encoded = Packet::empty();
+        while self.enc.receive_packet(&mut encoded).is_ok() {
+            encoded.set_stream(self.ost_index);
+            // rescale?
+            encoded.write_interleaved(&mut self.octx).unwrap();
+        }
+    }
+    fn queue_copy(&mut self) {
+        let surf = self.free_surfaces.pop().unwrap();
+
+        let mut dst = video::Video::empty();
+        dst.set_format(Pixel::DRM_PRIME);
+
+        unsafe {
+            let sts = av_hwframe_map(
+                dst.as_mut_ptr(),
+                surf.f.as_ptr(),
+                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
+            );
+            assert_eq!(sts, 0);
+
+            let desc = &*((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor);
+
+            let modifier = desc.objects[0].format_modifier.to_be_bytes();
+            let stride = desc.layers[0].planes[0].pitch as u32;
+            let fd = desc.objects[0].fd;
+
+            // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
+            // let stride = surf.export.layers[0].pitch[0];
+            // let fd =                 surf.export.objects[0].fd;
+            self.dma_params.add(
+                fd,
+                0,
+                0,
+                stride,
+                u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+                u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+            );
+        }
+
+        let out = self.copy_manager.capture_output(1, &*self.wl_output);
+
+        out.assign(Filter::new(
+            move |(interface, event), _, mut d| match event {
+                zwlr_screencopy_frame_v1::Event::Ready {
+                    tv_sec_hi,
+                    tv_sec_lo,
+                    tv_nsec,
+                } => {
+                    let state = d.get::<State>().unwrap();
+
+                    let surf = state.surfaces_owned_by_compositor.pop_front().unwrap();
+
+                    // unsafe {
+                    //     let sts = vaBeginPicture(state.va_dpy, state.va_context, surf.va_surface);
+                    //     assert_eq!(sts, 0);
+
+                    //     let sts = vaRenderPicture(state.va_dpy, state.va_context, null_mut(), 0);
+                    //     assert_eq!(sts, 0);
+
+                    //     let sts = vaEndPicture(state.va_dpy, state.va_context);
+                    //     assert_eq!(sts, 0);
+                    // };
+
+                    // let mut frame = ffmpeg_next::frame::video::Video::empty();
+
+                    // frame.set_format(Pixel::VAAPI);
+                    // unsafe { (*frame.as_mut_ptr()).data[3] = surf.va_surface as usize as *mut _ };
+
+                    // state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
+                    state
+                        .filter
+                        .get("in")
+                        .unwrap()
+                        .source()
+                        .add(&surf.f)
+                        .unwrap();
+
+                    state.surfaces_owned_by_filter.push_back(surf);
+
+                    let mut yuv_frame = frame::Video::empty();
+                    while state
+                        .filter
+                        .get("out")
+                        .unwrap()
+                        .sink()
+                        .frame(&mut yuv_frame)
+                        .is_ok()
+                    {
+                        state.free_surfaces.push(state.surfaces_owned_by_filter.pop_front().unwrap());
+                        state.enc.send_frame(&yuv_frame).unwrap();
+                    }
+
+                    state.process_ready();
+                }
+                _ => {}
+            },
+        ));
+
+        let buf = self.dma_params.create_immed(
+            self.dims.unwrap().0,
+            self.dims.unwrap().1,
+            gbm::Format::Xrgb8888 as u32,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+        );
+
+        // dma_params.destroy();
+
+        out.copy_with_damage(&*buf);
+
+        self.surfaces_owned_by_compositor.push_back(surf);
+    }
+
+    fn eof_flush(&mut self)  {
+        self.filter.get("in").unwrap().source().flush().unwrap();
+        self.process_ready();
+        self.enc.send_eof().unwrap();
+        self.process_ready();
+        self.octx.write_trailer().unwrap();
+    }
 }
 
 struct AvHwDevCtx {
@@ -212,7 +348,6 @@ impl AvHwFrameCtx {
 // }
 
 fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
-
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
         &filter::find("buffer").unwrap(),
@@ -240,7 +375,6 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         av_free(p as *mut _ as *mut _);
     }
 
-
     // g.add(
     //     &ffmpeg_next::filter::find("scale_vaapi").unwrap(),
     //     "pixfmt_convert",
@@ -265,15 +399,17 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         .unwrap();
 
     // g.get("Parsed_scale_vaapi").unwrap().as_mut_ptr();
-    
 
     g.validate().unwrap();
 
     g
-
 }
 
 fn main() {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || r.store(false, Ordering::SeqCst)).unwrap();
+
     ffmpeg_next::init().unwrap();
 
     ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
@@ -310,54 +446,6 @@ fn main() {
     let man: Main<ZwlrScreencopyManagerV1> = gm
         .instantiate_exact(ZwlrScreencopyManagerV1::VERSION)
         .unwrap();
-
-    let out = man.capture_output(1, &*wl_output);
-
-    out.assign(Filter::new(
-        move |(interface, event), _, mut d| match event {
-            zwlr_screencopy_frame_v1::Event::Ready {
-                tv_sec_hi,
-                tv_sec_lo,
-                tv_nsec,
-            } => {
-                let state = d.get::<State>().unwrap();
-
-                let surf = state.pending_surfaces.pop_front().unwrap();
-
-                // unsafe {
-                //     let sts = vaBeginPicture(state.va_dpy, state.va_context, surf.va_surface);
-                //     assert_eq!(sts, 0);
-
-                //     let sts = vaRenderPicture(state.va_dpy, state.va_context, null_mut(), 0);
-                //     assert_eq!(sts, 0);
-
-                //     let sts = vaEndPicture(state.va_dpy, state.va_context);
-                //     assert_eq!(sts, 0);
-                // };
-
-                // let mut frame = ffmpeg_next::frame::video::Video::empty();
-
-                // frame.set_format(Pixel::VAAPI);
-                // unsafe { (*frame.as_mut_ptr()).data[3] = surf.va_surface as usize as *mut _ };
-
-                // state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
-                state.filter.get("in").unwrap().source().add(&surf.f).unwrap();
-
-                let mut yuv_frame = frame::Video::empty();
-                while state.filter.get("out").unwrap().sink().frame(&mut yuv_frame).is_ok() {
-                    state.enc.send_frame(&yuv_frame).unwrap();
-                }
-
-                let mut encoded = Packet::empty();
-                while state.enc.receive_packet(&mut encoded).is_ok() {
-                    encoded.set_stream(state.ost_index);
-                    // rescale?
-                    encoded.write_interleaved(&mut state.octx).unwrap();
-                }
-            }
-            _ => {}
-        },
-    ));
 
     let dma: Main<ZwpLinuxDmabufV1> = gm.instantiate_exact(ZwpLinuxDmabufV1::VERSION).unwrap();
     let dma_params = dma.create_params();
@@ -408,33 +496,6 @@ fn main() {
     enc.set_height(2160);
     enc.set_time_base((1, 60));
 
-    unsafe {
-
-        // let mut hw_device_ctx = null_mut();
-
-        // let opts = dict!{
-        //     "connection_type" => "drm"
-        // };
-
-        // let sts = av_hwdevice_ctx_create(&mut hw_device_ctx, ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-        //                             &b"/dev/dri/card0\0"[0] as *const _ as *const _, opts.as_mut_ptr(), 0);
-        // assert_eq!(sts, 0);
-
-        // let hwframe = av_hwframe_ctx_alloc(hw_device_ctx);
-        // let hwframe_casted = (*hwframe).data as *mut AVHWFramesContext;
-
-        // // ffmpeg does not expose RGB vaapi
-        // (*hwframe_casted).format = Pixel::VAAPI.into();
-        // (*hwframe_casted).sw_format = AVPixelFormat::AV_PIX_FMT_YUV420P;
-        // (*hwframe_casted).width = 1920;
-        // (*hwframe_casted).height = 1080;
-        // (*hwframe_casted).initial_pool_size = 20;
-
-        // (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx;
-        // (*enc.as_mut_ptr()).hw_frames_ctx = hwframe;
-        // (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_YUV420P;
-    }
-
     let mut hw_device_ctx = AvHwDevCtx::new_libva();
     let mut frames_rgb = hw_device_ctx
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_RGB0)
@@ -474,13 +535,17 @@ fn main() {
         free_surfaces: Vec::new(),
         // va_dpy: null_mut(),
         // va_context: 0,
-        pending_surfaces: VecDeque::new(),
+        surfaces_owned_by_compositor: VecDeque::new(),
+        surfaces_owned_by_filter: VecDeque::new(),
         enc,
         filter: g,
         ost_index: 0, // ??
         octx: output,
+        dma_params,
+        copy_manager: man,
+        wl_output,
+        running,
     };
-
 
     eq.sync_roundtrip(&mut state, |a, b, c| println!("{:?} {:?} {:?}", a, b, c))
         .unwrap();
@@ -494,181 +559,22 @@ fn main() {
         .open("/dev/dri/card0")
         .unwrap();
 
-    // let gbm = unsafe { Device::new_from_fd(card_file.as_raw_fd()) }.unwrap();
-
-    // let gbm_buf: BufferObject<u8> = gbm
-    //     .create_buffer_object(
-    //         w as u32,
-    //         h as u32,
-    //         gbm::Format::Xrgb8888,
-    //         BufferObjectFlags::LINEAR | BufferObjectFlags::RENDERING,
-    //     )
-    //     .unwrap();
-
-    // let va_dpy = unsafe {
-    //     let display = vaGetDisplayDRM(drm_device_file.as_raw_fd());
-    //     if display.is_null() {
-    //         panic!();
-    //     }
-    //     let mut major = 0;
-    //     let mut minor = 0;
-    //     let sts = vaInitialize(display, &mut major, &mut minor);
-    //     if sts != 0 {
-    //         panic!();
-    //     }
-    //     display
-    // };
-    // state.va_dpy = va_dpy;
-
-    // let config_id = unsafe {
-    //     let mut config_id = MaybeUninit::uninit();
-    //     let sts = vaCreateConfig(
-    //         va_dpy,
-    //         VAProfile_VAProfileH264High,
-    //         VAEntrypoint_VAEntrypointEncSliceLP,
-    //         null_mut(),
-    //         0,
-    //         config_id.as_mut_ptr(),
-    //     );
-    //     assert_eq!(sts, 0);
-    //     config_id.assume_init()
-    // };
-
-    // let mut surfaces = Vec::new();
-    for _ in 0..5 {
-        // state
-        //     .free_surfaces
-        //     .push(unsafe { alloc_va_surface(va_dpy, w, h) });
-
-        let f = frames_rgb.alloc();
-        // let vaSurface = unsafe { (*f.as_ptr()).data[3] as usize as i32 };
-
-        state.free_surfaces.push(VaSurface { f });
-        // surfaces.push(state.free_surfaces.last().unwrap().f.clone());
+    for _ in 0..1 {
+        state.free_surfaces.push(VaSurface {
+            f: frames_rgb.alloc(),
+        });
     }
 
-    // unsafe {
-    //     let sts = vaCreateContext(
-    //         va_dpy,
-    //         config_id,
-    //         w as i32,
-    //         h as i32,
-    //         VA_PROGRESSIVE as i32,
-    //         surfaces.as_mut_ptr(),
-    //         surfaces.len() as i32,
-    //         &mut state.va_context,
-    //     );
-    //     assert_eq!(sts, 0);
-    // }
-
-    // let modifier = u64::from(gbm_buf.modifier().unwrap()).to_be_bytes();
-    // dma_params.add(
-    //     gbm_buf.as_raw_fd(),
-    //     0,
-    //     0,
-    //     gbm_buf.stride().unwrap(),
-    //     u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-    //     u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-    // );
-
-    {
-        let surf = state.free_surfaces.pop().unwrap();
-
-        let mut dst = video::Video::empty();
-        dst.set_format(Pixel::DRM_PRIME);
-
-        unsafe {
-            let sts = av_hwframe_map(
-                dst.as_mut_ptr(),
-                surf.f.as_ptr(),
-                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
-            );
-            assert_eq!(sts, 0);
-
-            let desc = &*((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor);
-
-            let modifier = desc.objects[0].format_modifier.to_be_bytes();
-            let stride = desc.layers[0].planes[0].pitch as u32;
-            let fd = desc.objects[0].fd;
-
-            // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
-            // let stride = surf.export.layers[0].pitch[0];
-            // let fd =                 surf.export.objects[0].fd;
-            dma_params.add(
-                fd,
-                0,
-                0,
-                stride,
-                u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-                u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-            );
+            // state.queue_copy();
+    while state.running.load(Ordering::SeqCst) {
+        while !state.free_surfaces.is_empty() {
+            state.queue_copy();
         }
-
-        let buf = dma_params.create_immed(
-            w,
-            h,
-            gbm::Format::Xrgb8888 as u32,
-            zwp_linux_buffer_params_v1::Flags::empty(),
-        );
-
-        // dma_params.destroy();
-
-        out.copy_with_damage(&*buf);
-
-        state.pending_surfaces.push_back(surf);
-    }
-
-    loop {
         eq.dispatch(&mut state, |_, _, _| ()).unwrap();
     }
-
-    // gbm_buf
-    //     .map(&gbm, 0, 0, w as u32, h as u32, |map| {
-    //         map.buffer();
-
-    //         let img = ImageBuffer::from_fn(map.width(), map.height(), |x, y| {
-    //             let start_idx = usize::try_from(map.stride() * y + x * 4).unwrap();
-    //             let buf = &map.buffer()[start_idx..];
-    //             Rgba([buf[2], buf[1], buf[0], buf[3]])
-    //         });
-    //         img.write_to(
-    //             &mut File::create("out.png").unwrap(),
-    //             ImageOutputFormat::Png,
-    //         )
-    //         .unwrap();
-    //     })
-    //     .unwrap()
-    //     .unwrap();
-
-    // unsafe {
-    //     let mut ptr = null_mut();
-    //     let sts = vaMapBuffer(va_dpy, image.buf, &mut ptr);
-    //     if sts != 0 {
-    //         panic!("sts={sts}");
-    //     }
-
-    //     let ptr = ptr as *const u8;
-
-    //     let img = ImageBuffer::from_fn(w as u32, h as u32, |x, y| {
-    //         let start_idx = usize::try_from(stride * y + x * 4).unwrap();
-    //         let buf = ptr.add(start_idx);
-    //         Rgba([
-    //             buf.add(2).read(),
-    //             buf.add(1).read(),
-    //             buf.add(0).read(),
-    //             buf.add(3).read(),
-    //         ])
-    //     });
-
-    //     let sts = vaUnmapBuffer(va_dpy, image.buf);
-    //     assert_eq!(sts, 0);
-
-    //     img.write_to(
-    //         &mut File::create("out.png").unwrap(),
-    //         ImageOutputFormat::Png,
-    //     )
-    //     .unwrap();
+    // loop {
+    //     eq.dispatch(&mut state, |_, _, _| ()).unwrap();
     // }
 
-    output.write_trailer().unwrap();
+    state.eof_flush();
 }
