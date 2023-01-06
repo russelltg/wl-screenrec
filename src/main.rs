@@ -25,7 +25,6 @@ use ffmpeg::{
     frame::{self, video},
     Packet,
 };
-// use gbm::{BufferObject, BufferObjectFlags, Device};
 use wayland_client::{
     protocol::wl_output::{self, WlOutput},
     Display, Filter, GlobalManager, Interface, Main,
@@ -74,7 +73,7 @@ struct State {
 
     surfaces_owned_by_compositor: VecDeque<(VaSurface, video::Video)>,
     surfaces_owned_by_filter: VecDeque<VaSurface>,
-    free_surfaces: Vec<VaSurface>,
+    // free_surfaces: Vec<VaSurface>,
 
     // va_dpy: *mut c_void,
     // va_context: u32,
@@ -82,10 +81,11 @@ struct State {
     filter: filter::graph::Graph,
     ost_index: usize,
     octx: format::context::Output,
-    dma_params: Main<ZwpLinuxBufferParamsV1>,
+    dma: Main<ZwpLinuxDmabufV1>,
     copy_manager: Main<ZwlrScreencopyManagerV1>,
     wl_output: Main<WlOutput>,
     running: Arc<AtomicBool>,
+    frames_rgb: AvHwFrameCtx,
 }
 
 impl State {
@@ -98,7 +98,8 @@ impl State {
         }
     }
     fn queue_copy(&mut self) {
-        let mut surf = self.free_surfaces.pop().unwrap();
+        // let mut surf = self.free_surfaces.pop().unwrap();
+        let mut surf = self.frames_rgb.alloc();
 
         // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
         // let stride = surf.export.layers[0].pitch[0];
@@ -110,7 +111,8 @@ impl State {
         let stride = desc.layers[0].planes[0].pitch as u32;
         let fd = desc.objects[0].fd;
 
-        self.dma_params.add(
+        let dma_params = self.dma.create_params();
+        dma_params.add(
             fd,
             0,
             0,
@@ -154,9 +156,10 @@ impl State {
                         .frame(&mut yuv_frame)
                         .is_ok()
                     {
-                        state
-                            .free_surfaces
-                            .push(state.surfaces_owned_by_filter.pop_front().unwrap());
+                        // state
+                        //     .free_surfaces
+                        //     .push(state.surfaces_owned_by_filter.pop_front().unwrap());
+                        println!("encoding frame");
                         state.enc.send_frame(&yuv_frame).unwrap();
                     }
 
@@ -166,7 +169,7 @@ impl State {
             },
         ));
 
-        let buf = self.dma_params.create_immed(
+        let buf = dma_params.create_immed(
             self.dims.unwrap().0,
             self.dims.unwrap().1,
             gbm::Format::Xrgb8888 as u32,
@@ -345,7 +348,6 @@ fn main() {
         .unwrap();
 
     let dma: Main<ZwpLinuxDmabufV1> = gm.instantiate_exact(ZwpLinuxDmabufV1::VERSION).unwrap();
-    let dma_params = dma.create_params();
 
     // dma.assign(Filter::new(move |ev, _, _| match ev {
     //     Events::Dma { event: ev, object: o } => {
@@ -411,9 +413,6 @@ fn main() {
     let g = filter(&frames_rgb);
     println!("{}", g.dump());
 
-    // let mut out = g.get("out").unwrap();
-    // out.set_pixel_format(Pixel::VAAPI);
-
     ost.set_parameters(&enc);
     let enc = enc
         .open_as_with(
@@ -429,19 +428,17 @@ fn main() {
 
     let mut state = State {
         dims: None,
-        free_surfaces: Vec::new(),
-        // va_dpy: null_mut(),
-        // va_context: 0,
         surfaces_owned_by_compositor: VecDeque::new(),
         surfaces_owned_by_filter: VecDeque::new(),
         enc,
         filter: g,
-        ost_index: 0, // ??
+        ost_index: 0,
         octx: output,
-        dma_params,
+        dma,
         copy_manager: man,
         wl_output,
         running,
+        frames_rgb,
     };
 
     eq.sync_roundtrip(&mut state, |a, b, c| println!("{:?} {:?} {:?}", a, b, c))
@@ -456,12 +453,12 @@ fn main() {
         .open("/dev/dri/card0")
         .unwrap();
 
-    for _ in 0..1 {
-        state.free_surfaces.push(frames_rgb.alloc());
-    }
+    // for _ in 0..1 {
+    //     state.free_surfaces.push(frames_rgb.alloc());
+    // }
 
     while state.running.load(Ordering::SeqCst) {
-        while !state.free_surfaces.is_empty() {
+        while state.surfaces_owned_by_compositor.len() < 5 {
             state.queue_copy();
         }
         eq.dispatch(&mut state, |_, _, _| ()).unwrap();
