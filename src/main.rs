@@ -3,16 +3,10 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::VecDeque,
     ffi::c_int,
-    fs::File,
-    mem::MaybeUninit,
-    os::{
-        fd::{AsFd, AsRawFd},
-        raw::c_void,
-    },
-    ptr::{null, null_mut},
+    ptr::null_mut,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
 };
 
@@ -22,39 +16,24 @@ use ffmpeg::{
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_create_derived,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, AVBufferRef,
-        AVDRMFrameDescriptor, AVFrame, AVHWDeviceContext, AVHWFramesContext, AVPixelFormat,
-        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init,
+        av_hwframe_get_buffer, av_hwframe_map, AVDRMFrameDescriptor, AVHWFramesContext,
+        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Pixel},
     frame::{self, video},
-    Codec, Packet,
+    Packet,
 };
 // use gbm::{BufferObject, BufferObjectFlags, Device};
-use image::{EncodableLayout, ImageBuffer, ImageOutputFormat, Rgba};
-use vaapi_sys::{
-    vaCreateSurfaces, vaExportSurfaceHandle, vaGetDisplayDRM, vaInitialize,
-    VADRMPRIMESurfaceDescriptor, _VADRMPRIMESurfaceDescriptor__bindgen_ty_1, vaBeginPicture,
-    vaCreateConfig, vaCreateContext, vaDeriveImage, vaDestroyImage, vaEndPicture, vaMapBuffer,
-    vaRenderPicture, vaUnmapBuffer, VAEntrypoint_VAEntrypointEncSlice,
-    VAEntrypoint_VAEntrypointEncSliceLP, VAImage, VAProfile_VAProfileAV1Profile0,
-    VAProfile_VAProfileH264High, VA_EXPORT_SURFACE_READ_WRITE, VA_FOURCC_XRGB, VA_PROGRESSIVE,
-    VA_RT_FORMAT_RGB32, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-};
 use wayland_client::{
-    event_enum,
     protocol::wl_output::{self, WlOutput},
     Display, Filter, GlobalManager, Interface, Main,
 };
 use wayland_protocols::{
-    unstable::linux_dmabuf::{
-        self,
-        v1::client::{
-            zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-            zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-        },
+    unstable::linux_dmabuf::v1::client::{
+        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     },
     wlr::unstable::screencopy::v1::client::{
         zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
@@ -66,19 +45,36 @@ use wayland_protocols::{
 struct Args {}
 
 struct VaSurface {
-    // va_surface: u32,
-    // export: VADRMPRIMESurfaceDescriptor,
-    // img: VAImage,
     f: video::Video,
+}
+
+impl VaSurface {
+    fn map(&mut self) -> (AVDRMFrameDescriptor, video::Video) {
+        let mut dst = video::Video::empty();
+        dst.set_format(Pixel::DRM_PRIME);
+
+        unsafe {
+            let sts = av_hwframe_map(
+                dst.as_mut_ptr(),
+                self.f.as_ptr(),
+                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
+            );
+            assert_eq!(sts, 0);
+
+            (
+                *((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor),
+                dst,
+            )
+        }
+    }
 }
 
 struct State {
     dims: Option<(i32, i32)>,
-    
-    surfaces_owned_by_compositor: VecDeque<VaSurface>,
+
+    surfaces_owned_by_compositor: VecDeque<(VaSurface, video::Video)>,
     surfaces_owned_by_filter: VecDeque<VaSurface>,
     free_surfaces: Vec<VaSurface>,
-
 
     // va_dpy: *mut c_void,
     // va_context: u32,
@@ -102,37 +98,26 @@ impl State {
         }
     }
     fn queue_copy(&mut self) {
-        let surf = self.free_surfaces.pop().unwrap();
+        let mut surf = self.free_surfaces.pop().unwrap();
 
-        let mut dst = video::Video::empty();
-        dst.set_format(Pixel::DRM_PRIME);
+        // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
+        // let stride = surf.export.layers[0].pitch[0];
+        // let fd =                 surf.export.objects[0].fd;
 
-        unsafe {
-            let sts = av_hwframe_map(
-                dst.as_mut_ptr(),
-                surf.f.as_ptr(),
-                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
-            );
-            assert_eq!(sts, 0);
+        let (desc, mapping) = surf.map();
 
-            let desc = &*((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor);
+        let modifier = desc.objects[0].format_modifier.to_be_bytes();
+        let stride = desc.layers[0].planes[0].pitch as u32;
+        let fd = desc.objects[0].fd;
 
-            let modifier = desc.objects[0].format_modifier.to_be_bytes();
-            let stride = desc.layers[0].planes[0].pitch as u32;
-            let fd = desc.objects[0].fd;
-
-            // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
-            // let stride = surf.export.layers[0].pitch[0];
-            // let fd =                 surf.export.objects[0].fd;
-            self.dma_params.add(
-                fd,
-                0,
-                0,
-                stride,
-                u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-                u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-            );
-        }
+        self.dma_params.add(
+            fd,
+            0,
+            0,
+            stride,
+            u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+            u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+        );
 
         let out = self.copy_manager.capture_output(1, &*self.wl_output);
 
@@ -145,25 +130,11 @@ impl State {
                 } => {
                     let state = d.get::<State>().unwrap();
 
-                    let surf = state.surfaces_owned_by_compositor.pop_front().unwrap();
+                    let (surf, drop_mapping) =
+                        state.surfaces_owned_by_compositor.pop_front().unwrap();
 
-                    // unsafe {
-                    //     let sts = vaBeginPicture(state.va_dpy, state.va_context, surf.va_surface);
-                    //     assert_eq!(sts, 0);
+                    drop(drop_mapping);
 
-                    //     let sts = vaRenderPicture(state.va_dpy, state.va_context, null_mut(), 0);
-                    //     assert_eq!(sts, 0);
-
-                    //     let sts = vaEndPicture(state.va_dpy, state.va_context);
-                    //     assert_eq!(sts, 0);
-                    // };
-
-                    // let mut frame = ffmpeg_next::frame::video::Video::empty();
-
-                    // frame.set_format(Pixel::VAAPI);
-                    // unsafe { (*frame.as_mut_ptr()).data[3] = surf.va_surface as usize as *mut _ };
-
-                    // state.enc.as_mut().unwrap().send_frame(&surf.f).unwrap();
                     state
                         .filter
                         .get("in")
@@ -183,7 +154,9 @@ impl State {
                         .frame(&mut yuv_frame)
                         .is_ok()
                     {
-                        state.free_surfaces.push(state.surfaces_owned_by_filter.pop_front().unwrap());
+                        state
+                            .free_surfaces
+                            .push(state.surfaces_owned_by_filter.pop_front().unwrap());
                         state.enc.send_frame(&yuv_frame).unwrap();
                     }
 
@@ -204,10 +177,10 @@ impl State {
 
         out.copy_with_damage(&*buf);
 
-        self.surfaces_owned_by_compositor.push_back(surf);
+        self.surfaces_owned_by_compositor.push_back((surf, mapping));
     }
 
-    fn eof_flush(&mut self)  {
+    fn eof_flush(&mut self) {
         self.filter.get("in").unwrap().source().flush().unwrap();
         self.process_ready();
         self.enc.send_eof().unwrap();
@@ -242,29 +215,6 @@ impl AvHwDevCtx {
         }
     }
 
-    // fn new_drm() -> Self {
-    //     unsafe {
-    //         let mut hw_device_ctx = null_mut();
-
-    //         let opts = dict! {
-    //             "connection_type" => "drm"
-    //         };
-
-    //         let sts = av_hwdevice_ctx_create(
-    //             &mut hw_device_ctx,
-    //             ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
-    //             null_mut(),
-    //             opts.as_mut_ptr(),
-    //             0,
-    //         );
-    //         assert_eq!(sts, 0);
-
-    //         Self {
-    //             ptr: hw_device_ctx
-    //         }
-    //     }
-    // }
-
     fn create_frame_ctx(&mut self, pixfmt: AVPixelFormat) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
             let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
@@ -297,55 +247,14 @@ struct AvHwFrameCtx {
 }
 
 impl AvHwFrameCtx {
-    fn alloc(&mut self) -> video::Video {
+    fn alloc(&mut self) -> VaSurface {
         let mut frame = ffmpeg_next::frame::video::Video::empty();
         let sts = unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) };
         assert_eq!(sts, 0);
 
-        frame
+        VaSurface { f: frame }
     }
 }
-
-// unsafe fn alloc_va_surface(va_dpy: *mut c_void, w: i32, h: i32) -> VaSurface {
-//     let mut surface = 0;
-//     let sts = vaCreateSurfaces(
-//         va_dpy,
-//         VA_RT_FORMAT_RGB32,
-//         w as u32,
-//         h as u32,
-//         &mut surface,
-//         1,
-//         null_mut(),
-//         0,
-//     );
-//     if sts != 0 {
-//         panic!();
-//     }
-
-//     let mut p: MaybeUninit<VADRMPRIMESurfaceDescriptor> = MaybeUninit::uninit();
-//     let sts = vaExportSurfaceHandle(
-//         va_dpy,
-//         surface,
-//         VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-//         VA_EXPORT_SURFACE_READ_WRITE,
-//         p.as_mut_ptr() as *mut _,
-//     );
-//     if sts != 0 {
-//         panic!();
-//     }
-
-//     let mut image = MaybeUninit::uninit();
-//     let sts = vaDeriveImage(va_dpy, surface, image.as_mut_ptr());
-//     if sts != 0 {
-//         panic!();
-//     }
-
-//     VaSurface {
-//         va_surface: surface,
-//         export: p.assume_init(),
-//         img: image.assume_init(),
-//     }
-// }
 
 fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
     let mut g = ffmpeg::filter::graph::Graph::new();
@@ -375,30 +284,18 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         av_free(p as *mut _ as *mut _);
     }
 
-    // g.add(
-    //     &ffmpeg_next::filter::find("scale_vaapi").unwrap(),
-    //     "pixfmt_convert",
-    //     "format=nv12",
-    // )
-    // .unwrap();
     g.add(&filter::find("buffersink").unwrap(), "out", "")
         .unwrap();
 
     let mut out = g.get("out").unwrap();
     out.set_pixel_format(Pixel::VAAPI);
 
-    // g.output("in", 0)
-    //     .unwrap()
-    //     .input("pixfmt_convert", 0)
-    //     .unwrap();
     g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
         .parse("scale_vaapi=format=nv12")
         .unwrap();
-
-    // g.get("Parsed_scale_vaapi").unwrap().as_mut_ptr();
 
     g.validate().unwrap();
 
@@ -560,21 +457,15 @@ fn main() {
         .unwrap();
 
     for _ in 0..1 {
-        state.free_surfaces.push(VaSurface {
-            f: frames_rgb.alloc(),
-        });
+        state.free_surfaces.push(frames_rgb.alloc());
     }
 
-            // state.queue_copy();
     while state.running.load(Ordering::SeqCst) {
         while !state.free_surfaces.is_empty() {
             state.queue_copy();
         }
         eq.dispatch(&mut state, |_, _, _| ()).unwrap();
     }
-    // loop {
-    //     eq.dispatch(&mut state, |_, _, _| ()).unwrap();
-    // }
 
     state.eof_flush();
 }
