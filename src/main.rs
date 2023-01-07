@@ -94,10 +94,11 @@ struct State {
     running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
     frame_send: crossbeam::channel::Sender<VaSurface>,
+
+    starting_timestamp: Option<i64>,
 }
 
 impl State {
-    fn process_ready(&mut self) {}
     fn queue_copy(&mut self) {
         // let mut surf = self.free_surfaces.pop().unwrap();
         let mut surf = self.frames_rgb.alloc();
@@ -149,7 +150,11 @@ impl State {
                     let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
                     let pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
 
-                    surf.f.set_pts(Some(pts));
+                    if state.starting_timestamp.is_none() {
+                        state.starting_timestamp = Some(pts);
+                    }
+
+                    surf.f.set_pts(Some(pts - state.starting_timestamp.unwrap()));
 
                     state.frame_send.try_send(surf);
                 }
@@ -465,6 +470,7 @@ fn main() {
         running,
         frames_rgb,
         frame_send,
+        starting_timestamp: None
     };
 
     let mut enc_state = EncState {
@@ -484,11 +490,6 @@ fn main() {
     let (w, h) = state.dims.unwrap();
 
     // TODO: detect formats
-    let mut drm_device_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/dri/card0")
-        .unwrap();
 
     // for _ in 0..1 {
     //     state.free_surfaces.push(frames_rgb.alloc());
@@ -505,5 +506,6 @@ fn main() {
         }
     }
 
-    enc_thread.join();
+    drop(state); // causes thread to quit
+    enc_thread.join().unwrap();
 }
