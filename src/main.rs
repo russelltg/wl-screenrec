@@ -7,7 +7,7 @@ use std::{
     ops::RangeInclusive,
     ptr::null_mut,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
     },
 };
@@ -24,12 +24,12 @@ use ffmpeg::{
         av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init,
         av_hwframe_get_buffer, av_hwframe_map, AVDRMFrameDescriptor, AVHWFramesContext,
-        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_buffer_get_ref_count,
     },
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
-    Packet,
+    Packet, Error,
 };
 use wayland_client::{
     globals::{registry_queue_init, GlobalList, GlobalListContents},
@@ -99,7 +99,8 @@ struct State {
     wl_output: WlOutput,
     running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
-    frame_send: crossbeam::channel::Sender<VaSurface>,
+    // frame_send: crossbeam::channel::Sender<VaSurface>,
+    enc: EncState,
     starting_timestamp: Option<i64>,
 }
 
@@ -163,15 +164,16 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 surf.f
                     .set_pts(Some(pts - state.starting_timestamp.unwrap()));
 
-                if state.frame_send.try_send(surf).is_err() {
-                    println!("dropping frame!");
-                }
+                // if state.frame_send.try_send(surf).is_err() {
+                //     println!("dropping frame!");
+                // }
+                state.enc.push(surf);
 
                 state.queue_copy(qhandle);
             }
-            zwlr_screencopy_frame_v1::Event::BufferDone => {
-                state.queue_copy(qhandle);
-            }
+            // zwlr_screencopy_frame_v1::Event::BufferDone => {
+            //     state.queue_copy(qhandle);
+            // }
             // zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
             //     format,
             //     width,
@@ -274,7 +276,8 @@ impl State {
         wl_output_name: u32,
         running: Arc<AtomicBool>,
         frames_rgb: AvHwFrameCtx,
-        frame_send: Sender<VaSurface>,
+        // frame_send: Sender<VaSurface>,
+        enc: EncState,
     ) -> Self {
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(
@@ -306,20 +309,22 @@ impl State {
             wl_output,
             running,
             frames_rgb,
-            frame_send,
+            // frame_send,
+            enc,
             starting_timestamp: None,
         }
     }
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
         // let mut surf = self.free_surfaces.pop().unwrap();
-        let mut surf = self.frames_rgb.alloc();
-
+        let mut surf = self.frames_rgb.alloc().unwrap();
+        
         // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
         // let stride = surf.export.layers[0].pitch[0];
         // let fd =                 surf.export.objects[0].fd;
 
         let (desc, mapping) = surf.map();
+        
 
         let modifier = desc.objects[0].format_modifier.to_be_bytes();
         let stride = desc.layers[0].planes[0].pitch as u32;
@@ -385,23 +390,31 @@ impl EncState {
         }
     }
 
-    fn thread(&mut self) {
-        while let Ok(frame) = self.frame_recv.recv() {
-            self.filter
-                .get("in")
-                .unwrap()
-                .source()
-                .add(&frame.f)
-                .unwrap();
-
-            self.process_ready();
-        }
-
+    fn flush(&mut self) {
         self.filter.get("in").unwrap().source().flush().unwrap();
         self.process_ready();
         self.enc.send_eof().unwrap();
         self.process_ready();
         self.octx.write_trailer().unwrap();
+    }
+
+    fn thread(&mut self) {
+        while let Ok(frame) = self.frame_recv.recv() {
+            self.push(frame);
+        }
+
+        self.flush();
+    }
+
+    fn push(&mut self, surf: VaSurface) {
+        self.filter
+            .get("in")
+            .unwrap()
+            .source()
+            .add(&surf.f)
+            .unwrap();
+
+        self.process_ready();
     }
 }
 
@@ -442,7 +455,7 @@ impl AvHwDevCtx {
             (*hwframe_casted).sw_format = pixfmt;
             (*hwframe_casted).width = 3840;
             (*hwframe_casted).height = 2160;
-            (*hwframe_casted).initial_pool_size = 20;
+            (*hwframe_casted).initial_pool_size = 5;
 
             let sts = av_hwframe_ctx_init(hwframe);
             assert_eq!(sts, 0);
@@ -462,13 +475,25 @@ struct AvHwFrameCtx {
     ptr: *mut ffmpeg::sys::AVBufferRef,
 }
 
-impl AvHwFrameCtx {
-    fn alloc(&mut self) -> VaSurface {
-        let mut frame = ffmpeg_next::frame::video::Video::empty();
-        let sts = unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) };
-        assert_eq!(sts, 0);
+impl Drop for AvHwFrameCtx {
+    fn drop(&mut self) {
+        unsafe {
+            av_buffer_unref(&mut self.ptr);
+        }
+    }
+}
 
-        VaSurface { f: frame }
+static CTR: AtomicU32 = AtomicU32::new(0);
+
+impl AvHwFrameCtx {
+    fn alloc(&mut self) -> Result<VaSurface, Error> {
+        let id = CTR.fetch_add(1, Ordering::SeqCst);
+
+        let mut frame = ffmpeg_next::frame::video::Video::empty();
+        match unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) } {
+            0 => Ok(VaSurface{ f: frame} ),
+            e => Err(Error::from(e)),
+        }
     }
 }
 
@@ -625,16 +650,6 @@ fn main() {
         }
     }
 
-    let mut state = State::new(
-        &display,
-        &queue.handle(),
-        &globals,
-        disp_name.unwrap(),
-        running,
-        frames_rgb,
-        frame_send,
-    );
-
     let mut enc_state = EncState {
         frame_recv,
         filter,
@@ -642,9 +657,20 @@ fn main() {
         octx,
     };
 
-    let enc_thread = std::thread::spawn(move || {
-        enc_state.thread();
-    });
+    let mut state = State::new(
+        &display,
+        &queue.handle(),
+        &globals,
+        disp_name.unwrap(),
+        running,
+        frames_rgb,
+        // frame_send,
+        enc_state,
+    );
+
+    // let enc_thread = std::thread::spawn(move || {
+    //     enc_state.thread();
+    // });
 
     // TODO: detect formats
     while state.running.load(Ordering::SeqCst) {
@@ -654,6 +680,23 @@ fn main() {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
-    drop(state); // causes thread to quit
-    enc_thread.join().unwrap();
+    state.enc.flush();
+    // drop(state); // causes thread to quit
+    // enc_thread.join().unwrap();
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn free_vaapi() {
+        let mut hw = AvHwDevCtx::new_libva();
+        let mut framectx = hw.create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0).unwrap();
+
+        for _ in 0..100 {
+            let f = framectx.alloc().unwrap();
+            drop(f);
+        }
+    }
 }
