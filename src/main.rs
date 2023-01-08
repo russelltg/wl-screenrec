@@ -8,13 +8,16 @@ use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
-    },
+    }, ops::RangeInclusive,
 };
 
 use clap::{command, error::ErrorKind, Parser};
-use crossbeam::{channel::bounded, thread};
+use crossbeam::{
+    channel::{bounded, Sender},
+    thread,
+};
 use ffmpeg::{
-    codec::{self, Parameters, context},
+    codec::{self, context, Parameters},
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
@@ -23,7 +26,7 @@ use ffmpeg::{
         AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
-    format::{self, Pixel, Output},
+    format::{self, Output, Pixel},
     frame::{self, video},
     Packet,
 };
@@ -31,18 +34,17 @@ use wayland_client::{
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::{self, WlOutput},
+        wl_registry::{self, WlRegistry}, wl_display::WlDisplay,
     },
-    Display, Filter, GlobalManager, Interface, Main,
+    Connection, Dispatch, Proxy, globals::{GlobalList, registry_queue_init, GlobalListContents}, EventQueue, QueueHandle,
 };
-use wayland_protocols::{
-    unstable::linux_dmabuf::v1::client::{
-        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-    },
-    wlr::unstable::screencopy::v1::client::{
-        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-    },
+use wayland_protocols::wp::linux_dmabuf::zv1::client::{
+    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
 #[derive(Parser, Debug)]
@@ -75,31 +77,211 @@ impl VaSurface {
 }
 
 struct State {
-    dims: Option<(i32, i32)>,
+    dims: Option<(u32, u32)>,
 
     surfaces_owned_by_compositor: VecDeque<(
         VaSurface,
         video::Video,
-        Main<ZwpLinuxBufferParamsV1>,
-        Main<ZwlrScreencopyFrameV1>,
-        Main<WlBuffer>,
+        ZwpLinuxBufferParamsV1,
+        // Main<ZwlrScreencopyFrameV1>,
+        WlBuffer,
     )>,
     // free_surfaces: Vec<VaSurface>,
 
     // va_dpy: *mut c_void,
     // va_context: u32,
-    dma: Main<ZwpLinuxDmabufV1>,
-    copy_manager: Main<ZwlrScreencopyManagerV1>,
-    wl_output: Main<WlOutput>,
+    dma: ZwpLinuxDmabufV1,
+    capture: ZwlrScreencopyFrameV1,
+    // wl_output: Main<WlOutput>,
     running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
     frame_send: crossbeam::channel::Sender<VaSurface>,
-
     starting_timestamp: Option<i64>,
 }
 
+impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrScreencopyManagerV1,
+        event: <ZwlrScreencopyManagerV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        todo!()
+    }
+}
+
+impl Dispatch<ZwpLinuxDmabufV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwpLinuxDmabufV1,
+        event: <ZwpLinuxDmabufV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        todo!()
+    }
+}
+
+impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrScreencopyFrameV1,
+        event: <ZwlrScreencopyFrameV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_screencopy_frame_v1::Event::Ready {
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+            } => {
+                let (mut surf, drop_mapping, destroy_buffer_params, destroy_buffer) =
+                    state.surfaces_owned_by_compositor.pop_front().unwrap();
+
+                drop(drop_mapping);
+                destroy_buffer_params.destroy();
+                // destroy_frame.destroy();
+                destroy_buffer.destroy();
+
+                let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
+                let mut pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
+                println!("pts={pts}");
+
+                if state.starting_timestamp.is_none() {
+                    state.starting_timestamp = Some(pts);
+                }
+
+                surf.f.set_pts(Some(pts - state.starting_timestamp.unwrap()));
+
+                if state.frame_send.try_send(surf).is_err() {
+                    println!("dropping frame!");
+                }
+
+                state.queue_copy(qhandle);
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                state.queue_copy(qhandle);
+            }
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => {
+                state.dims = Some((width, height));
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpLinuxBufferParamsV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwpLinuxBufferParamsV1,
+        event: <ZwpLinuxBufferParamsV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        todo!()
+    }
+}
+
+impl Dispatch<WlBuffer, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &WlBuffer,
+        event: <WlBuffer as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        dbg!(event);
+    }
+}
+
+impl Dispatch<WlRegistry, GlobalListContents> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &WlRegistry,
+        event: <WlRegistry as Proxy>::Event,
+        data: &GlobalListContents,
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        todo!()
+    }
+}
+
+impl Dispatch<WlRegistry, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &WlRegistry,
+        event: <WlRegistry as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        dbg!(event);
+    }
+}
+
+impl Dispatch<WlOutput, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &WlOutput,
+        event: <WlOutput as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        dbg!(event);
+    }
+}
+
 impl State {
-    fn queue_copy(&mut self) {
+    fn new(
+        display: &WlDisplay,
+        eq: &QueueHandle<State>,
+        gm: &GlobalList,
+        wl_output_name: u32,
+        running: Arc<AtomicBool>,
+        frames_rgb: AvHwFrameCtx,
+        frame_send: Sender<VaSurface>,
+    ) -> Self {
+        let man: ZwlrScreencopyManagerV1 = gm
+            .bind(&eq, ZwlrScreencopyManagerV1::interface().version..=ZwlrScreencopyManagerV1::interface().version, ()).unwrap();
+
+        let dma: ZwpLinuxDmabufV1 = gm.bind(&eq, ZwpLinuxDmabufV1::interface().version..=ZwpLinuxDmabufV1::interface().version, ()).unwrap();
+
+        let registry = display.get_registry(eq, ());
+
+        let wl_output: WlOutput = registry.bind(wl_output_name, WlOutput::interface().version,  eq, ());
+        
+
+        let capture = man.capture_output(1, &wl_output, &eq, ());
+
+        let v = capture.version();
+
+        State {
+            dims: None,
+            surfaces_owned_by_compositor: VecDeque::new(),
+            dma,
+            capture,
+            // wl_output,
+            running,
+            frames_rgb,
+            frame_send,
+            starting_timestamp: None,
+        }
+    }
+
+    fn queue_copy(&mut self, eq: &QueueHandle<State>) {
         // let mut surf = self.free_surfaces.pop().unwrap();
         let mut surf = self.frames_rgb.alloc();
 
@@ -113,7 +295,7 @@ impl State {
         let stride = desc.layers[0].planes[0].pitch as u32;
         let fd = desc.objects[0].fd;
 
-        let dma_params = self.dma.create_params();
+        let dma_params = self.dma.create_params(eq, ());
         dma_params.add(
             fd,
             0,
@@ -123,58 +305,19 @@ impl State {
             u32::from_be_bytes(modifier[4..].try_into().unwrap()),
         );
 
-        let out = self.copy_manager.capture_output(1, &*self.wl_output);
-
-        out.assign(Filter::new(
-            move |(interface, event), _, mut d| match event {
-                zwlr_screencopy_frame_v1::Event::Ready {
-                    tv_sec_hi,
-                    tv_sec_lo,
-                    tv_nsec,
-                } => {
-                    let state = d.get::<State>().unwrap();
-
-                    let (
-                        mut surf,
-                        drop_mapping,
-                        destroy_buffer_params,
-                        destroy_frame,
-                        destroy_buffer,
-                    ) = state.surfaces_owned_by_compositor.pop_front().unwrap();
-
-                    drop(drop_mapping);
-                    destroy_buffer_params.destroy();
-                    destroy_frame.destroy();
-                    destroy_buffer.destroy();
-
-                    let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
-                    let pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
-
-                    if state.starting_timestamp.is_none() {
-                        state.starting_timestamp = Some(pts);
-                    }
-
-                    surf.f.set_pts(Some(pts - state.starting_timestamp.unwrap()));
-
-                    state.frame_send.try_send(surf);
-                }
-                _ => {}
-            },
-        ));
-
         let buf = dma_params.create_immed(
-            self.dims.unwrap().0,
-            self.dims.unwrap().1,
+            self.dims.unwrap().0 as i32,
+            self.dims.unwrap().1 as i32,
             gbm::Format::Xrgb8888 as u32,
-            zwp_linux_buffer_params_v1::Flags::empty(),
+            zwp_linux_buffer_params_v1::Flags::empty(), eq, ()
         );
 
         // dma_params.destroy();
 
-        out.copy_with_damage(&*buf);
+        self.capture.copy_with_damage(&buf);
 
         self.surfaces_owned_by_compositor
-            .push_back((surf, mapping, dma_params, out, buf));
+            .push_back((surf, mapping, dma_params, buf));
     }
 }
 
@@ -182,36 +325,39 @@ struct EncState {
     filter: filter::Graph,
     enc: encoder::Video,
     octx: format::context::Output,
-    frame_recv: crossbeam::channel::Receiver<VaSurface>
+    frame_recv: crossbeam::channel::Receiver<VaSurface>,
 }
 
 impl EncState {
-
     fn process_ready(&mut self) {
+        let mut yuv_frame = frame::Video::empty();
+        while self
+            .filter
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut yuv_frame)
+            .is_ok()
+        {
+            self.enc.send_frame(&yuv_frame).unwrap();
+        }
 
-            let mut yuv_frame = frame::Video::empty();
-            while self.filter
-                .get("out")
-                .unwrap()
-                .sink()
-                .frame(&mut yuv_frame)
-                .is_ok()
-            {
-                self.enc.send_frame(&yuv_frame).unwrap();
-            }
-
-            let mut encoded = Packet::empty();
-            while self.enc.receive_packet(&mut encoded).is_ok() {
-                encoded.set_stream(0);
-                // rescale?
-                encoded.write_interleaved(&mut self.octx).unwrap();
-            }
+        let mut encoded = Packet::empty();
+        while self.enc.receive_packet(&mut encoded).is_ok() {
+            encoded.set_stream(0);
+            // rescale?
+            encoded.write_interleaved(&mut self.octx).unwrap();
+        }
     }
 
     fn thread(&mut self) {
-
         while let Ok(frame) = self.frame_recv.recv() {
-            self.filter.get("in").unwrap().source().add(&frame.f).unwrap();
+            self.filter
+                .get("in")
+                .unwrap()
+                .source()
+                .add(&frame.f)
+                .unwrap();
 
             self.process_ready();
         }
@@ -337,6 +483,32 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
     g
 }
 
+struct RegistryHandler {
+    output_names: Vec<u32>,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for RegistryHandler {
+    fn event(
+        state: &mut Self,
+        proxy: &wl_registry::WlRegistry,
+        event: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            if interface == wl_output::WlOutput::interface().name {
+                state.output_names.push(name);
+            }
+        }
+    }
+}
+
 fn main() {
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -348,63 +520,8 @@ fn main() {
 
     let args = Args::parse();
 
-    let conn = Display::connect_to_env().unwrap();
-    let mut eq = conn.create_event_queue();
-    let attachment = conn.attach(eq.token());
-
-    let gm = GlobalManager::new(&attachment);
-
-    eq.sync_roundtrip(&mut (), |_, _, _| unreachable!())
-        .unwrap();
-
-    let mut outputs = Vec::new();
-    for (name, interface_name, _version) in gm.list() {
-        if interface_name == wl_output::WlOutput::NAME {
-            outputs.push(name);
-        }
-    }
-
-    if outputs.len() != 1 {
-        panic!("oops for now!");
-    }
-    let output = outputs[0];
-
-    let wl_output: Main<WlOutput> = attachment.get_registry().bind(WlOutput::VERSION, output);
-
-    // let out: Main<ZxdgOutputManagerV1> = gm.instantiate_exact(ZxdgOutputManagerV1::VERSION).unwrap();
-
-    // out.get
-
-    let man: Main<ZwlrScreencopyManagerV1> = gm
-        .instantiate_exact(ZwlrScreencopyManagerV1::VERSION)
-        .unwrap();
-
-    let dma: Main<ZwpLinuxDmabufV1> = gm.instantiate_exact(ZwpLinuxDmabufV1::VERSION).unwrap();
-
-    // dma.assign(Filter::new(move |ev, _, _| match ev {
-    //     Events::Dma { event: ev, object: o } => {
-
-    //     }
-
-    // }));
-
-    wl_output.assign(Filter::new(
-        move |(interface, event), _, mut d| match event {
-            wl_output::Event::Mode {
-                flags,
-                width,
-                height,
-                refresh,
-            } => {
-                if flags.contains(wl_output::Mode::Current) {
-                    d.get::<State>().unwrap().dims = Some((width, height));
-                }
-            }
-            _ => {}
-        },
-    ));
-
-    let mut octx = ffmpeg_next::format::output(&"out.mp4").unwrap();
+    let conn = Connection::connect_to_env().unwrap();
+    let display = conn.display();
     let mut ost = octx
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
         .unwrap();
@@ -461,17 +578,17 @@ fn main() {
 
     let (frame_send, frame_recv) = bounded(10);
 
-    let mut state = State {
-        dims: None,
-        surfaces_owned_by_compositor: VecDeque::new(),
-        dma,
-        copy_manager: man,
-        wl_output,
-        running,
-        frames_rgb,
-        frame_send,
-        starting_timestamp: None
-    };
+    let (globals, mut queue) = registry_queue_init(&conn).unwrap();
+
+    let mut disp_name = None;
+    for g in globals.contents().clone_list() {
+        if g.interface == WlOutput::interface().name {
+            assert_eq!(disp_name, None);
+            disp_name = Some(g.name);
+        }
+    }
+
+    let mut state = State::new(&display,&queue.handle(), &globals, disp_name.unwrap(), running, frames_rgb, frame_send);
 
     let mut enc_state = EncState {
         frame_recv,
@@ -484,11 +601,6 @@ fn main() {
         enc_state.thread();
     });
 
-    eq.sync_roundtrip(&mut state, |a, b, c| println!("{:?} {:?} {:?}", a, b, c))
-        .unwrap();
-
-    let (w, h) = state.dims.unwrap();
-
     // TODO: detect formats
 
     // for _ in 0..1 {
@@ -496,14 +608,10 @@ fn main() {
     // }
 
     while state.running.load(Ordering::SeqCst) {
-        while state.surfaces_owned_by_compositor.len() < 5 {
-            state.queue_copy();
-        }
-        match eq.dispatch(&mut state, |_, _, _| ()) {
-            Ok(_) => continue,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => panic!("{}", e),
-        }
+        // while state.surfaces_owned_by_compositor.len() < 5 {
+        //     state.queue_copy();
+        // }
+        queue.blocking_dispatch(&mut state).unwrap();
     }
 
     drop(state); // causes thread to quit
