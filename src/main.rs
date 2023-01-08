@@ -19,17 +19,18 @@ use crossbeam::{
 };
 use ffmpeg::{
     codec::{self, context, Parameters},
+    color::Range,
     dict, encoder,
     ffi::{
-        av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init,
-        av_hwframe_get_buffer, av_hwframe_map, AVDRMFrameDescriptor, AVHWFramesContext,
-        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_buffer_get_ref_count,
+        av_buffer_get_ref_count, av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc,
+        av_buffersrc_parameters_set, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, AVDRMFrameDescriptor,
+        AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
-    Packet, Error, color::Range, 
+    Error, Packet,
 };
 use wayland_client::{
     globals::{registry_queue_init, GlobalList, GlobalListContents},
@@ -155,7 +156,6 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
 
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
                 let mut pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
-                println!("pts={pts}");
 
                 if state.starting_timestamp.is_none() {
                     state.starting_timestamp = Some(pts);
@@ -171,16 +171,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
 
                 state.queue_copy(qhandle);
             }
-            // zwlr_screencopy_frame_v1::Event::BufferDone => {
-            //     state.queue_copy(qhandle);
-            // }
-            // zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
-            //     format,
-            //     width,
-            //     height,
-            // } => {
-            //     state.dims = Some((width, height));
-            // }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {}
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf { .. } => {}
+            zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
+            zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
+            zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             _ => {
                 dbg!(event);
             }
@@ -210,7 +205,12 @@ impl Dispatch<WlBuffer, ()> for State {
         conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        dbg!(event);
+        match event {
+            wayland_client::protocol::wl_buffer::Event::Release => {}
+            _ => {
+                dbg!(event);
+            }
+        }
     }
 }
 
@@ -223,7 +223,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        todo!()
+        dbg!(event);
     }
 }
 
@@ -318,13 +318,12 @@ impl State {
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
         // let mut surf = self.free_surfaces.pop().unwrap();
         let mut surf = self.frames_rgb.alloc().unwrap();
-        
+
         // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
         // let stride = surf.export.layers[0].pitch[0];
         // let fd =                 surf.export.objects[0].fd;
 
         let (desc, mapping) = surf.map();
-        
 
         let modifier = desc.objects[0].format_modifier.to_be_bytes();
         let stride = desc.layers[0].planes[0].pitch as u32;
@@ -457,7 +456,7 @@ impl AvHwDevCtx {
             (*hwframe_casted).height = 2160;
             (*hwframe_casted).initial_pool_size = 5;
 
-            let sts= av_hwframe_ctx_init(hwframe);
+            let sts = av_hwframe_ctx_init(hwframe);
             if sts != 0 {
                 return Err(Error::from(sts));
             }
@@ -501,7 +500,7 @@ impl AvHwFrameCtx {
 
         let mut frame = ffmpeg_next::frame::video::Video::empty();
         match unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) } {
-            0 => Ok(VaSurface{ f: frame} ),
+            0 => Ok(VaSurface { f: frame }),
             e => Err(Error::from(e)),
         }
     }
