@@ -29,7 +29,7 @@ use ffmpeg::{
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
-    Packet, Error,
+    Packet, Error, color::Range, 
 };
 use wayland_client::{
     globals::{registry_queue_init, GlobalList, GlobalListContents},
@@ -97,7 +97,7 @@ struct State {
     screencopy_manager: ZwlrScreencopyManagerV1,
     // capture: ZwlrScreencopyFrameV1,
     wl_output: WlOutput,
-    running: Arc<AtomicBool>,
+    // running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
     // frame_send: crossbeam::channel::Sender<VaSurface>,
     enc: EncState,
@@ -274,7 +274,7 @@ impl State {
         eq: &QueueHandle<State>,
         gm: &GlobalList,
         wl_output_name: u32,
-        running: Arc<AtomicBool>,
+        // running: Arc<AtomicBool>,
         frames_rgb: AvHwFrameCtx,
         // frame_send: Sender<VaSurface>,
         enc: EncState,
@@ -307,7 +307,7 @@ impl State {
             dma,
             screencopy_manager: man,
             wl_output,
-            running,
+            // running,
             frames_rgb,
             // frame_send,
             enc,
@@ -457,8 +457,10 @@ impl AvHwDevCtx {
             (*hwframe_casted).height = 2160;
             (*hwframe_casted).initial_pool_size = 5;
 
-            let sts = av_hwframe_ctx_init(hwframe);
-            assert_eq!(sts, 0);
+            let sts= av_hwframe_ctx_init(hwframe);
+            if sts != 0 {
+                return Err(Error::from(sts));
+            }
 
             let ret = Ok(AvHwFrameCtx {
                 ptr: av_buffer_ref(hwframe),
@@ -467,6 +469,14 @@ impl AvHwDevCtx {
             av_buffer_unref(&mut hwframe);
 
             ret
+        }
+    }
+}
+
+impl Drop for AvHwDevCtx {
+    fn drop(&mut self) {
+        unsafe {
+            av_buffer_unref(&mut self.ptr);
         }
     }
 }
@@ -569,10 +579,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryHandler {
     }
 }
 
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+#[no_mangle]
+extern "C" fn quit() {
+    RUNNING.store(false, Ordering::SeqCst);
+}
+
 fn main() {
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || r.store(false, Ordering::SeqCst)).unwrap();
+    ctrlc::set_handler(move || RUNNING.store(false, Ordering::SeqCst)).unwrap();
 
     ffmpeg_next::init().unwrap();
 
@@ -662,7 +677,7 @@ fn main() {
         &queue.handle(),
         &globals,
         disp_name.unwrap(),
-        running,
+        // running,
         frames_rgb,
         // frame_send,
         enc_state,
@@ -673,7 +688,7 @@ fn main() {
     // });
 
     // TODO: detect formats
-    while state.running.load(Ordering::SeqCst) {
+    while RUNNING.load(Ordering::SeqCst) {
         // while state.surfaces_owned_by_compositor.len() < 5 {
         //     state.queue_copy();
         // }
