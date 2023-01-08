@@ -522,6 +522,9 @@ fn main() {
 
     let conn = Connection::connect_to_env().unwrap();
     let display = conn.display();
+
+
+    let mut octx = ffmpeg_next::format::output(&"out.mp4").unwrap();
     let mut ost = octx
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
         .unwrap();
@@ -602,10 +605,6 @@ fn main() {
     });
 
     // TODO: detect formats
-
-    // for _ in 0..1 {
-    //     state.free_surfaces.push(frames_rgb.alloc());
-    // }
 
     while state.running.load(Ordering::SeqCst) {
         // while state.surfaces_owned_by_compositor.len() < 5 {
