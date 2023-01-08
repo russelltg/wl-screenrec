@@ -4,11 +4,12 @@ use std::{
     collections::VecDeque,
     ffi::c_int,
     io,
+    ops::RangeInclusive,
     ptr::null_mut,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
-    }, ops::RangeInclusive,
+    },
 };
 
 use clap::{command, error::ErrorKind, Parser};
@@ -31,12 +32,14 @@ use ffmpeg::{
     Packet,
 };
 use wayland_client::{
+    globals::{registry_queue_init, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
+        wl_display::WlDisplay,
         wl_output::{self, WlOutput},
-        wl_registry::{self, WlRegistry}, wl_display::WlDisplay,
+        wl_registry::{self, WlRegistry},
     },
-    Connection, Dispatch, Proxy, globals::{GlobalList, registry_queue_init, GlobalListContents}, EventQueue, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
@@ -156,7 +159,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     state.starting_timestamp = Some(pts);
                 }
 
-                surf.f.set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                surf.f
+                    .set_pts(Some(pts - state.starting_timestamp.unwrap()));
 
                 if state.frame_send.try_send(surf).is_err() {
                     println!("dropping frame!");
@@ -174,7 +178,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             } => {
                 state.dims = Some((width, height));
             }
-            _ => {}
+            _ => {
+                dbg!(event);
+            }
         }
     }
 }
@@ -255,14 +261,26 @@ impl State {
         frame_send: Sender<VaSurface>,
     ) -> Self {
         let man: ZwlrScreencopyManagerV1 = gm
-            .bind(&eq, ZwlrScreencopyManagerV1::interface().version..=ZwlrScreencopyManagerV1::interface().version, ()).unwrap();
+            .bind(
+                &eq,
+                ZwlrScreencopyManagerV1::interface().version
+                    ..=ZwlrScreencopyManagerV1::interface().version,
+                (),
+            )
+            .unwrap();
 
-        let dma: ZwpLinuxDmabufV1 = gm.bind(&eq, ZwpLinuxDmabufV1::interface().version..=ZwpLinuxDmabufV1::interface().version, ()).unwrap();
+        let dma: ZwpLinuxDmabufV1 = gm
+            .bind(
+                &eq,
+                ZwpLinuxDmabufV1::interface().version..=ZwpLinuxDmabufV1::interface().version,
+                (),
+            )
+            .unwrap();
 
         let registry = display.get_registry(eq, ());
 
-        let wl_output: WlOutput = registry.bind(wl_output_name, WlOutput::interface().version,  eq, ());
-        
+        let wl_output: WlOutput =
+            registry.bind(wl_output_name, WlOutput::interface().version, eq, ());
 
         let capture = man.capture_output(1, &wl_output, &eq, ());
 
@@ -309,7 +327,9 @@ impl State {
             self.dims.unwrap().0 as i32,
             self.dims.unwrap().1 as i32,
             gbm::Format::Xrgb8888 as u32,
-            zwp_linux_buffer_params_v1::Flags::empty(), eq, ()
+            zwp_linux_buffer_params_v1::Flags::empty(),
+            eq,
+            (),
         );
 
         // dma_params.destroy();
@@ -523,7 +543,6 @@ fn main() {
     let conn = Connection::connect_to_env().unwrap();
     let display = conn.display();
 
-
     let mut octx = ffmpeg_next::format::output(&"out.mp4").unwrap();
     let mut ost = octx
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
@@ -591,7 +610,15 @@ fn main() {
         }
     }
 
-    let mut state = State::new(&display,&queue.handle(), &globals, disp_name.unwrap(), running, frames_rgb, frame_send);
+    let mut state = State::new(
+        &display,
+        &queue.handle(),
+        &globals,
+        disp_name.unwrap(),
+        running,
+        frames_rgb,
+        frame_send,
+    );
 
     let mut enc_state = EncState {
         frame_recv,
