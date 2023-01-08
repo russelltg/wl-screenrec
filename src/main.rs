@@ -80,13 +80,13 @@ impl VaSurface {
 }
 
 struct State {
-    dims: Option<(u32, u32)>,
+    dims: Option<(i32, i32)>,
 
     surfaces_owned_by_compositor: VecDeque<(
         VaSurface,
         video::Video,
         ZwpLinuxBufferParamsV1,
-        // Main<ZwlrScreencopyFrameV1>,
+        ZwlrScreencopyFrameV1,
         WlBuffer,
     )>,
     // free_surfaces: Vec<VaSurface>,
@@ -94,8 +94,9 @@ struct State {
     // va_dpy: *mut c_void,
     // va_context: u32,
     dma: ZwpLinuxDmabufV1,
-    capture: ZwlrScreencopyFrameV1,
-    // wl_output: Main<WlOutput>,
+    screencopy_manager: ZwlrScreencopyManagerV1,
+    // capture: ZwlrScreencopyFrameV1,
+    wl_output: WlOutput,
     running: Arc<AtomicBool>,
     frames_rgb: AvHwFrameCtx,
     frame_send: crossbeam::channel::Sender<VaSurface>,
@@ -143,12 +144,12 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 tv_sec_lo,
                 tv_nsec,
             } => {
-                let (mut surf, drop_mapping, destroy_buffer_params, destroy_buffer) =
+                let (mut surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
                     state.surfaces_owned_by_compositor.pop_front().unwrap();
 
                 drop(drop_mapping);
                 destroy_buffer_params.destroy();
-                // destroy_frame.destroy();
+                destroy_frame.destroy();
                 destroy_buffer.destroy();
 
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
@@ -171,13 +172,13 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::BufferDone => {
                 state.queue_copy(qhandle);
             }
-            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
-                format,
-                width,
-                height,
-            } => {
-                state.dims = Some((width, height));
-            }
+            // zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+            //     format,
+            //     width,
+            //     height,
+            // } => {
+            //     state.dims = Some((width, height));
+            // }
             _ => {
                 dbg!(event);
             }
@@ -246,7 +247,22 @@ impl Dispatch<WlOutput, ()> for State {
         conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        dbg!(event);
+        match event {
+            wl_output::Event::Mode {
+                flags,
+                width,
+                height,
+                refresh,
+            } => {
+                if state.dims.is_none() {
+                    state.dims = Some((width, height));
+                    state.queue_copy(qhandle);
+                }
+            }
+            _ => {
+                dbg!(event);
+            }
+        }
     }
 }
 
@@ -282,16 +298,12 @@ impl State {
         let wl_output: WlOutput =
             registry.bind(wl_output_name, WlOutput::interface().version, eq, ());
 
-        let capture = man.capture_output(1, &wl_output, &eq, ());
-
-        let v = capture.version();
-
         State {
             dims: None,
             surfaces_owned_by_compositor: VecDeque::new(),
             dma,
-            capture,
-            // wl_output,
+            screencopy_manager: man,
+            wl_output,
             running,
             frames_rgb,
             frame_send,
@@ -334,10 +346,13 @@ impl State {
 
         // dma_params.destroy();
 
-        self.capture.copy_with_damage(&buf);
+        let capture = self
+            .screencopy_manager
+            .capture_output(1, &self.wl_output, &eq, ());
+        capture.copy_with_damage(&buf);
 
         self.surfaces_owned_by_compositor
-            .push_back((surf, mapping, dma_params, buf));
+            .push_back((surf, mapping, dma_params, capture, buf));
     }
 }
 
@@ -632,7 +647,6 @@ fn main() {
     });
 
     // TODO: detect formats
-
     while state.running.load(Ordering::SeqCst) {
         // while state.surfaces_owned_by_compositor.len() < 5 {
         //     state.queue_copy();
