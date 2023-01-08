@@ -2,7 +2,7 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::VecDeque,
-    ffi::c_int,
+    ffi::{c_int, CString},
     io,
     ops::RangeInclusive,
     ptr::null_mut,
@@ -12,7 +12,7 @@ use std::{
     },
 };
 
-use clap::{command, error::ErrorKind, Parser};
+use clap::{command, error::ErrorKind, ArgAction, Parser};
 use crossbeam::{
     channel::{bounded, Sender},
     thread,
@@ -24,13 +24,14 @@ use ffmpeg::{
     ffi::{
         av_buffer_get_ref_count, av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc,
         av_buffersrc_parameters_set, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, AVDRMFrameDescriptor,
-        AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, av_opt_set,
+        avcodec_alloc_context3, AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat,
+        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
-    Error, Packet,
+    Error, Packet, Rational,
 };
 use wayland_client::{
     globals::{registry_queue_init, GlobalList, GlobalListContents},
@@ -53,7 +54,10 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-struct Args {}
+struct Args {
+    #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse)]
+    hw: bool,
+}
 
 struct VaSurface {
     f: video::Video,
@@ -155,14 +159,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 destroy_buffer.destroy();
 
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
-                let mut pts = secs * 1_000_000 + i64::from(tv_nsec) / 1_000;
+                let mut pts = secs * 1_000_000_000 + i64::from(tv_nsec);
 
-                if state.starting_timestamp.is_none() {
-                    state.starting_timestamp = Some(pts);
-                }
+                // if state.starting_timestamp.is_none() {
+                //     state.starting_timestamp = Some(pts);
+                // }
 
-                surf.f
-                    .set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                // surf.f
+                //     .set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                surf.f.set_pts(Some(pts));
 
                 // if state.frame_send.try_send(surf).is_err() {
                 //     println!("dropping frame!");
@@ -365,6 +370,10 @@ struct EncState {
     enc: encoder::Video,
     octx: format::context::Output,
     frame_recv: crossbeam::channel::Receiver<VaSurface>,
+    filter_output_timebase: Rational,
+    octx_time_base: Rational,
+    last_pts: i64,
+    vid_stream_idx: usize,
 }
 
 impl EncState {
@@ -378,13 +387,21 @@ impl EncState {
             .frame(&mut yuv_frame)
             .is_ok()
         {
+            self.last_pts += 1;
+            yuv_frame.set_pts(Some(self.last_pts));
             self.enc.send_frame(&yuv_frame).unwrap();
         }
 
         let mut encoded = Packet::empty();
         while self.enc.receive_packet(&mut encoded).is_ok() {
-            encoded.set_stream(0);
+            encoded.set_stream(self.vid_stream_idx);
+
             // rescale?
+            dbg!(encoded.pts().unwrap());
+            // encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
+            // encoded.set_pts(None);
+            // encoded.set_dts(None);
+
             encoded.write_interleaved(&mut self.octx).unwrap();
         }
     }
@@ -506,13 +523,13 @@ impl AvHwFrameCtx {
     }
 }
 
-fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
+fn filter(inctx: &AvHwFrameCtx, hw: bool) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
         &filter::find("buffer").unwrap(),
         "in",
         &format!(
-            "video_size=2840x2160:pix_fmt={}:time_base=1/1000000",
+            "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
             AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
         ),
     )
@@ -522,10 +539,10 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         let p = &mut *av_buffersrc_parameters_alloc();
 
         p.width = 3840;
-        p.height = 2161;
+        p.height = 2160;
         p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
         p.time_base.num = 1;
-        p.time_base.den = 1_000_000;
+        p.time_base.den = 1_000_000_000;
         p.hw_frames_ctx = inctx.ptr;
 
         let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
@@ -538,18 +555,25 @@ fn filter(inctx: &AvHwFrameCtx) -> filter::Graph {
         .unwrap();
 
     let mut out = g.get("out").unwrap();
-    out.set_pixel_format(Pixel::VAAPI);
+    if hw {
+        out.set_pixel_format(Pixel::VAAPI);
+    } else {
+        out.set_pixel_format(Pixel::NV12);
+    }
 
     g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
-        .parse("scale_vaapi=format=nv12")
+        .parse(&format!(
+            "scale_vaapi=format=nv12{}",
+            if hw { "" } else { ", hwdownload" }
+        ))
         .unwrap();
 
     g.validate().unwrap();
 
-    g
+    (g, Rational::new(1, 1_000_000_000))
 }
 
 struct RegistryHandler {
@@ -590,7 +614,7 @@ fn main() {
 
     ffmpeg_next::init().unwrap();
 
-    // ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
+    ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
 
     let args = Args::parse();
 
@@ -602,52 +626,73 @@ fn main() {
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
         .unwrap();
 
-    let mut param = Parameters::new();
-    unsafe {
-        (*param.as_mut_ptr()).codec_id = codec::id::Id::H264.into();
-    }
+    ost.set_time_base((1, 60));
 
-    // let mut enc = codec::context::Context::from_parameters(ost.parameters()).unwrap()
-    let mut enc = codec::context::Context::from_parameters(param)
-        .unwrap()
-        .encoder()
-        .video()
-        .unwrap();
+    let vid_stream_idx = ost.index();
 
-    enc.set_format(Pixel::VAAPI);
-    enc.set_flags(codec::Flags::GLOBAL_HEADER);
-    enc.set_width(3840);
-    enc.set_height(2160);
-    enc.set_time_base((1, 60));
+    let codec =
+        ffmpeg_next::encoder::find_by_name(if args.hw { "h264_vaapi" } else { "libx264" }).unwrap();
+
+    let mut enc =
+        unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
+            .encoder()
+            .video()
+            .unwrap();
 
     let mut hw_device_ctx = AvHwDevCtx::new_libva();
     let mut frames_rgb = hw_device_ctx
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0)
         .unwrap();
 
+    let (mut filter, filter_timebase) = filter(&frames_rgb, args.hw);
+
     let mut frames_yuv = hw_device_ctx
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12)
         .unwrap();
 
-    unsafe {
-        (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-        (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-        (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+    enc.set_bit_rate(4_000_000);
+    enc.set_width(3840);
+    enc.set_height(2160);
+    // enc.set_time_base(filter_timebase);
+    enc.set_time_base((1, 60));
+    enc.set_frame_rate(Some((60, 1)));
+    enc.set_flags(codec::Flags::GLOBAL_HEADER);
+
+    if args.hw {
+        enc.set_format(Pixel::VAAPI);
+
+        unsafe {
+            (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
+            (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+            (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+        }
+    } else {
+        enc.set_format(Pixel::NV12);
     }
 
-    let mut filter = filter(&frames_rgb);
     println!("{}", filter.dump());
 
     ost.set_parameters(&enc);
-    let mut enc = enc
-        .open_as_with(
-            encoder::find_by_name("h264_vaapi"),
-            dict! {
-                // "profile" => "high",
-                "low_power" => "1"
-            },
-        )
-        .unwrap();
+
+    let octx_time_base = ost.time_base();
+
+    unsafe {
+        dbg!((*enc.as_mut_ptr()).time_base.num);
+        dbg!((*enc.as_mut_ptr()).time_base.den);
+    }
+
+    let opts = if args.hw {
+        dict! {
+            // "profile" => "high",
+            "low_power" => "1"
+        }
+    } else {
+        dict! {
+        //     "preset" => "slow"
+        }
+    };
+
+    let mut enc = enc.open_with(opts).unwrap();
 
     ffmpeg_next::format::context::output::dump(&octx, 0, Some(&"out.mp4"));
     octx.write_header().unwrap();
@@ -668,7 +713,11 @@ fn main() {
         frame_recv,
         filter,
         enc,
+        filter_output_timebase: filter_timebase,
+        octx_time_base,
         octx,
+        last_pts: 0,
+        vid_stream_idx,
     };
 
     let mut state = State::new(
