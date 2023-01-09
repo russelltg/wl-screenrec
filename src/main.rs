@@ -9,7 +9,7 @@ use std::{
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
-    },
+    }, time::{Instant, Duration},
 };
 
 use clap::{command, error::ErrorKind, ArgAction, Parser};
@@ -26,7 +26,7 @@ use ffmpeg::{
         av_buffersrc_parameters_set, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
         av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, av_opt_set,
         avcodec_alloc_context3, AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat,
-        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_rescale, av_rescale_q,
     },
     filter,
     format::{self, Output, Pixel},
@@ -57,6 +57,26 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 struct Args {
     #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse)]
     hw: bool,
+}
+
+struct FpsCounter {
+    last_print_time: Instant,
+    ct: u64
+}
+
+impl FpsCounter {
+    fn new() -> Self {
+        Self {last_print_time: Instant::now(), ct: 0}
+    }
+    fn on_frame(&mut self) {
+        self.ct += 1;
+
+        if self.last_print_time.elapsed() > Duration::from_secs(1) {
+            println!("{} fps", self.ct);
+            self.last_print_time = Instant::now();
+            self.ct = 0;
+        }
+    }
 }
 
 struct VaSurface {
@@ -107,6 +127,7 @@ struct State {
     // frame_send: crossbeam::channel::Sender<VaSurface>,
     enc: EncState,
     starting_timestamp: Option<i64>,
+    fps_counter: FpsCounter,
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -150,6 +171,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 tv_sec_lo,
                 tv_nsec,
             } => {
+                state.fps_counter.on_frame();
+
                 let (mut surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
                     state.surfaces_owned_by_compositor.pop_front().unwrap();
 
@@ -159,15 +182,18 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 destroy_buffer.destroy();
 
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
-                let mut pts = secs * 1_000_000_000 + i64::from(tv_nsec);
+                let pts = secs * 1_000_000_000 + i64::from(tv_nsec);
 
-                // if state.starting_timestamp.is_none() {
-                //     state.starting_timestamp = Some(pts);
-                // }
+                if state.starting_timestamp.is_none() {
+                    state.starting_timestamp = Some(pts);
+                }
 
-                // surf.f
-                //     .set_pts(Some(pts - state.starting_timestamp.unwrap()));
-                surf.f.set_pts(Some(pts));
+                surf.f
+                    .set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                unsafe {
+                    (*surf.f.as_mut_ptr()).time_base.num = 1;
+                    (*surf.f.as_mut_ptr()).time_base.den = 1_000_000_000;
+                }
 
                 // if state.frame_send.try_send(surf).is_err() {
                 //     println!("dropping frame!");
@@ -317,6 +343,7 @@ impl State {
             // frame_send,
             enc,
             starting_timestamp: None,
+            fps_counter: FpsCounter::new(),
         }
     }
 
@@ -387,21 +414,17 @@ impl EncState {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-            self.last_pts += 1;
-            yuv_frame.set_pts(Some(self.last_pts));
+            unsafe {
+                let new_pts = av_rescale_q(yuv_frame.pts().unwrap(), self.filter_output_timebase.into(), self.octx_time_base.into());
+                yuv_frame.set_pts(Some(new_pts));
+            }
+
             self.enc.send_frame(&yuv_frame).unwrap();
         }
 
         let mut encoded = Packet::empty();
         while self.enc.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
-
-            // rescale?
-            dbg!(encoded.pts().unwrap());
-            // encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
-            // encoded.set_pts(None);
-            // encoded.set_dts(None);
-
             encoded.write_interleaved(&mut self.octx).unwrap();
         }
     }
@@ -614,19 +637,20 @@ fn main() {
 
     ffmpeg_next::init().unwrap();
 
-    ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
+    // ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
 
     let args = Args::parse();
 
     let conn = Connection::connect_to_env().unwrap();
     let display = conn.display();
 
-    let mut octx = ffmpeg_next::format::output(&"out.mp4").unwrap();
+    let mut octx = ffmpeg_next::format::output(&"out.avi").unwrap();
+
     let mut ost = octx
         .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
         .unwrap();
 
-    ost.set_time_base((1, 60));
+    ost.set_time_base((1, 120));
 
     let vid_stream_idx = ost.index();
 
@@ -650,12 +674,12 @@ fn main() {
         .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12)
         .unwrap();
 
-    enc.set_bit_rate(4_000_000);
+    enc.set_bit_rate(40_000_000);
     enc.set_width(3840);
     enc.set_height(2160);
     // enc.set_time_base(filter_timebase);
-    enc.set_time_base((1, 60));
-    enc.set_frame_rate(Some((60, 1)));
+    enc.set_time_base((1, 120));
+    enc.set_frame_rate(Some((120, 1)));
     enc.set_flags(codec::Flags::GLOBAL_HEADER);
 
     if args.hw {
@@ -673,6 +697,7 @@ fn main() {
     println!("{}", filter.dump());
 
     ost.set_parameters(&enc);
+    // enc.set_parameters(ost.parameters()).unwrap();
 
     let octx_time_base = ost.time_base();
 
@@ -688,13 +713,13 @@ fn main() {
         }
     } else {
         dict! {
-        //     "preset" => "slow"
+            "preset" => "ultrafast"
         }
     };
 
     let mut enc = enc.open_with(opts).unwrap();
 
-    ffmpeg_next::format::context::output::dump(&octx, 0, Some(&"out.mp4"));
+    ffmpeg_next::format::context::output::dump(&octx, 0, Some(&"out.avi"));
     octx.write_header().unwrap();
 
     let (frame_send, frame_recv) = bounded(10);
