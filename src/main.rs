@@ -4,12 +4,14 @@ use std::{
     collections::VecDeque,
     ffi::{c_int, CString},
     io,
+    num::ParseIntError,
     ops::RangeInclusive,
     ptr::null_mut,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
         Arc,
-    }, time::{Instant, Duration},
+    },
+    time::{Duration, Instant},
 };
 
 use clap::{command, error::ErrorKind, ArgAction, Parser};
@@ -24,15 +26,16 @@ use ffmpeg::{
     ffi::{
         av_buffer_get_ref_count, av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc,
         av_buffersrc_parameters_set, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, av_opt_set,
-        avcodec_alloc_context3, AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat,
-        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, av_rescale, av_rescale_q,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, av_opt_set, av_rescale,
+        av_rescale_q, avcodec_alloc_context3, AVDRMFrameDescriptor, AVHWFramesContext,
+        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
     Error, Packet, Rational,
 };
+use thiserror::Error;
 use wayland_client::{
     globals::{registry_queue_init, GlobalList, GlobalListContents},
     protocol::{
@@ -57,16 +60,63 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 struct Args {
     #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse)]
     hw: bool,
+
+    #[clap(long, short, default_value = "screenrecord.avi")]
+    output: String,
+
+    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`")]
+    geometry: Option<(u32, u32, u32, u32)>,
+}
+
+#[derive(Error, Debug)]
+enum ParseGeometryError {
+    #[error("invalid integer")]
+    BadInt(#[from] ParseIntError),
+    #[error("invalid geometry string")]
+    BadStructure,
+    #[error("invalid location string")]
+    BadLocation,
+    #[error("invalid size string")]
+    BadSize,
+}
+
+fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
+    use ParseGeometryError::*;
+    let mut it = s.split(' ');
+    let loc = it.next().ok_or(BadStructure)?;
+    let size = it.next().ok_or(BadStructure)?;
+    if it.next().is_some() {
+        return Err(BadStructure);
+    }
+
+    let mut it = loc.split(",");
+    let startx = it.next().ok_or(BadLocation)?.parse()?;
+    let starty = it.next().ok_or(BadLocation)?.parse()?;
+    if it.next().is_some() {
+        return Err(BadLocation);
+    }
+
+    let mut it = size.split("x");
+    let sizex = it.next().ok_or(BadSize)?.parse()?;
+    let sizey = it.next().ok_or(BadSize)?.parse()?;
+    if it.next().is_some() {
+        return Err(BadSize);
+    }
+
+    Ok((startx, starty, sizex, sizey))
 }
 
 struct FpsCounter {
     last_print_time: Instant,
-    ct: u64
+    ct: u64,
 }
 
 impl FpsCounter {
     fn new() -> Self {
-        Self {last_print_time: Instant::now(), ct: 0}
+        Self {
+            last_print_time: Instant::now(),
+            ct: 0,
+        }
     }
     fn on_frame(&mut self) {
         self.ct += 1;
@@ -105,8 +155,7 @@ impl VaSurface {
 }
 
 struct State {
-    dims: Option<(i32, i32)>,
-
+    // dims: Option<(i32, i32)>,
     surfaces_owned_by_compositor: VecDeque<(
         VaSurface,
         video::Video,
@@ -123,11 +172,13 @@ struct State {
     // capture: ZwlrScreencopyFrameV1,
     wl_output: WlOutput,
     // running: Arc<AtomicBool>,
-    frames_rgb: AvHwFrameCtx,
     // frame_send: crossbeam::channel::Sender<VaSurface>,
-    enc: EncState,
+    enc: Option<EncState>,
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
+    geometry: Option<(u32, u32, u32, u32)>,
+    output: String,
+    hw: bool,
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -195,10 +246,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     (*surf.f.as_mut_ptr()).time_base.den = 1_000_000_000;
                 }
 
-                // if state.frame_send.try_send(surf).is_err() {
-                //     println!("dropping frame!");
-                // }
-                state.enc.push(surf);
+                state.enc.as_mut().unwrap().push(surf);
 
                 state.queue_copy(qhandle);
             }
@@ -207,6 +255,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
+            zwlr_screencopy_frame_v1::Event::Failed => {
+                println!("Failed to screencopy!");
+                RUNNING.store(false, Ordering::SeqCst)
+            }
+
             _ => {
                 dbg!(event);
             }
@@ -287,8 +340,12 @@ impl Dispatch<WlOutput, ()> for State {
                 height,
                 refresh,
             } => {
-                if state.dims.is_none() {
-                    state.dims = Some((width, height));
+                if state.enc.is_none() {
+                    let (w, h) = match state.geometry {
+                        Some((_, _, w, h)) => (w as i32, h as i32),
+                        None => (width, height),
+                    };
+                    state.enc = Some(EncState::new(&state.output, state.hw, w, h));
                     state.queue_copy(qhandle);
                 }
             }
@@ -306,9 +363,11 @@ impl State {
         gm: &GlobalList,
         wl_output_name: u32,
         // running: Arc<AtomicBool>,
-        frames_rgb: AvHwFrameCtx,
+        // frames_rgb: AvHwFrameCtx,
         // frame_send: Sender<VaSurface>,
-        enc: EncState,
+        geometry: Option<(u32, u32, u32, u32)>,
+        output: String,
+        hw: bool,
     ) -> Self {
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(
@@ -333,23 +392,27 @@ impl State {
             registry.bind(wl_output_name, WlOutput::interface().version, eq, ());
 
         State {
-            dims: None,
+            // dims: None,
             surfaces_owned_by_compositor: VecDeque::new(),
             dma,
             screencopy_manager: man,
             wl_output,
             // running,
-            frames_rgb,
+            // frames_rgb,
+            enc: None,
             // frame_send,
-            enc,
             starting_timestamp: None,
             fps_counter: FpsCounter::new(),
+            geometry,
+            output,
+            hw,
         }
     }
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
         // let mut surf = self.free_surfaces.pop().unwrap();
-        let mut surf = self.frames_rgb.alloc().unwrap();
+        let enc = self.enc.as_mut().unwrap();
+        let mut surf = enc.frames_rgb.alloc().unwrap();
 
         // let modifier = surf.export.objects[0].drm_format_modifier.to_be_bytes();
         // let stride = surf.export.layers[0].pitch[0];
@@ -371,9 +434,10 @@ impl State {
             u32::from_be_bytes(modifier[4..].try_into().unwrap()),
         );
 
+        let (w, h) = enc.size;
         let buf = dma_params.create_immed(
-            self.dims.unwrap().0 as i32,
-            self.dims.unwrap().1 as i32,
+            w,
+            h,
             gbm::Format::Xrgb8888 as u32,
             zwp_linux_buffer_params_v1::Flags::empty(),
             eq,
@@ -382,9 +446,22 @@ impl State {
 
         // dma_params.destroy();
 
-        let capture = self
-            .screencopy_manager
-            .capture_output(1, &self.wl_output, &eq, ());
+        let capture = if let Some((x, y, sx, sy)) = self.geometry {
+            self.screencopy_manager.capture_output_region(
+                1,
+                &self.wl_output,
+                x as i32,
+                y as i32,
+                sx as i32,
+                sy as i32,
+                &eq,
+                (),
+            )
+        } else {
+            self.screencopy_manager
+                .capture_output(1, &self.wl_output, &eq, ())
+        };
+
         capture.copy_with_damage(&buf);
 
         self.surfaces_owned_by_compositor
@@ -396,14 +473,104 @@ struct EncState {
     filter: filter::Graph,
     enc: encoder::Video,
     octx: format::context::Output,
-    frame_recv: crossbeam::channel::Receiver<VaSurface>,
+    frames_rgb: AvHwFrameCtx,
+    // frame_recv: crossbeam::channel::Receiver<VaSurface>,
     filter_output_timebase: Rational,
     octx_time_base: Rational,
     last_pts: i64,
     vid_stream_idx: usize,
+    size: (i32, i32),
 }
 
 impl EncState {
+    fn new(output: &str, hw: bool, w: i32, h: i32) -> Self {
+        let mut octx = ffmpeg_next::format::output(&output).unwrap();
+
+        let mut ost = octx
+            .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
+            .unwrap();
+
+        ost.set_time_base((1, 120));
+
+        let vid_stream_idx = ost.index();
+
+        let codec =
+            ffmpeg_next::encoder::find_by_name(if hw { "h264_vaapi" } else { "libx264" }).unwrap();
+
+        let mut enc =
+            unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
+                .encoder()
+                .video()
+                .unwrap();
+
+        let mut hw_device_ctx = AvHwDevCtx::new_libva();
+        let mut frames_rgb = hw_device_ctx
+            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, w, h)
+            .unwrap();
+
+        let (mut filter, filter_timebase) = filter(&frames_rgb, hw, w, h);
+
+        let mut frames_yuv = hw_device_ctx
+            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, w, h)
+            .unwrap();
+
+        enc.set_bit_rate(40_000_000);
+        enc.set_width(w as u32);
+        enc.set_height(h as u32);
+        enc.set_time_base((1, 120));
+        enc.set_frame_rate(Some((120, 1)));
+        enc.set_flags(codec::Flags::GLOBAL_HEADER);
+
+        if hw {
+            enc.set_format(Pixel::VAAPI);
+
+            unsafe {
+                (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
+                (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+                (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+            }
+        } else {
+            enc.set_format(Pixel::NV12);
+        }
+
+        println!("{}", filter.dump());
+
+        ost.set_parameters(&enc);
+
+        let octx_time_base = ost.time_base();
+
+        unsafe {
+            dbg!((*enc.as_mut_ptr()).time_base.num);
+            dbg!((*enc.as_mut_ptr()).time_base.den);
+        }
+
+        let opts = if hw {
+            dict! {
+                // "profile" => "high",
+                "low_power" => "1"
+            }
+        } else {
+            dict! {
+                "preset" => "ultrafast"
+            }
+        };
+
+        let mut enc = enc.open_with(opts).unwrap();
+
+        ffmpeg_next::format::context::output::dump(&octx, 0, Some(&output));
+        octx.write_header().unwrap();
+        EncState {
+            filter,
+            enc,
+            filter_output_timebase: filter_timebase,
+            octx_time_base,
+            octx,
+            last_pts: 0,
+            vid_stream_idx,
+            frames_rgb,
+            size: (w, h),
+        }
+    }
     fn process_ready(&mut self) {
         let mut yuv_frame = frame::Video::empty();
         while self
@@ -415,7 +582,11 @@ impl EncState {
             .is_ok()
         {
             unsafe {
-                let new_pts = av_rescale_q(yuv_frame.pts().unwrap(), self.filter_output_timebase.into(), self.octx_time_base.into());
+                let new_pts = av_rescale_q(
+                    yuv_frame.pts().unwrap(),
+                    self.filter_output_timebase.into(),
+                    self.octx_time_base.into(),
+                );
                 yuv_frame.set_pts(Some(new_pts));
             }
 
@@ -437,13 +608,13 @@ impl EncState {
         self.octx.write_trailer().unwrap();
     }
 
-    fn thread(&mut self) {
-        while let Ok(frame) = self.frame_recv.recv() {
-            self.push(frame);
-        }
+    // fn thread(&mut self) {
+    //     while let Ok(frame) = self.frame_recv.recv() {
+    //         self.push(frame);
+    //     }
 
-        self.flush();
-    }
+    //     self.flush();
+    // }
 
     fn push(&mut self, surf: VaSurface) {
         self.filter
@@ -483,7 +654,12 @@ impl AvHwDevCtx {
         }
     }
 
-    fn create_frame_ctx(&mut self, pixfmt: AVPixelFormat) -> Result<AvHwFrameCtx, ffmpeg::Error> {
+    fn create_frame_ctx(
+        &mut self,
+        pixfmt: AVPixelFormat,
+        width: i32,
+        height: i32,
+    ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
             let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
             let hwframe_casted = (*hwframe).data as *mut AVHWFramesContext;
@@ -492,8 +668,8 @@ impl AvHwDevCtx {
             (*hwframe_casted).format = Pixel::VAAPI.into();
             // (*hwframe_casted).sw_format = AVPixelFormat::AV_PIX_FMT_YUV420P;
             (*hwframe_casted).sw_format = pixfmt;
-            (*hwframe_casted).width = 3840;
-            (*hwframe_casted).height = 2160;
+            (*hwframe_casted).width = width;
+            (*hwframe_casted).height = height;
             (*hwframe_casted).initial_pool_size = 5;
 
             let sts = av_hwframe_ctx_init(hwframe);
@@ -503,6 +679,7 @@ impl AvHwDevCtx {
 
             let ret = Ok(AvHwFrameCtx {
                 ptr: av_buffer_ref(hwframe),
+                // _devctx: self.clone(),
             });
 
             av_buffer_unref(&mut hwframe);
@@ -515,7 +692,8 @@ impl AvHwDevCtx {
 impl Drop for AvHwDevCtx {
     fn drop(&mut self) {
         unsafe {
-            av_buffer_unref(&mut self.ptr);
+            // TODO: debug: segfault when I add this
+            // av_buffer_unref(&mut self.ptr);
         }
     }
 }
@@ -527,7 +705,8 @@ struct AvHwFrameCtx {
 impl Drop for AvHwFrameCtx {
     fn drop(&mut self) {
         unsafe {
-            av_buffer_unref(&mut self.ptr);
+            // TODO: debug: segfault when I uncomment
+            // av_buffer_unref(&mut self.ptr);
         }
     }
 }
@@ -546,7 +725,7 @@ impl AvHwFrameCtx {
     }
 }
 
-fn filter(inctx: &AvHwFrameCtx, hw: bool) -> (filter::Graph, Rational) {
+fn filter(inctx: &AvHwFrameCtx, hw: bool, width: i32, height: i32) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
         &filter::find("buffer").unwrap(),
@@ -561,8 +740,8 @@ fn filter(inctx: &AvHwFrameCtx, hw: bool) -> (filter::Graph, Rational) {
     unsafe {
         let p = &mut *av_buffersrc_parameters_alloc();
 
-        p.width = 3840;
-        p.height = 2160;
+        p.width = width;
+        p.height = height;
         p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
         p.time_base.num = 1;
         p.time_base.den = 1_000_000_000;
@@ -644,86 +823,6 @@ fn main() {
     let conn = Connection::connect_to_env().unwrap();
     let display = conn.display();
 
-    let mut octx = ffmpeg_next::format::output(&"out.avi").unwrap();
-
-    let mut ost = octx
-        .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
-        .unwrap();
-
-    ost.set_time_base((1, 120));
-
-    let vid_stream_idx = ost.index();
-
-    let codec =
-        ffmpeg_next::encoder::find_by_name(if args.hw { "h264_vaapi" } else { "libx264" }).unwrap();
-
-    let mut enc =
-        unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
-            .encoder()
-            .video()
-            .unwrap();
-
-    let mut hw_device_ctx = AvHwDevCtx::new_libva();
-    let mut frames_rgb = hw_device_ctx
-        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0)
-        .unwrap();
-
-    let (mut filter, filter_timebase) = filter(&frames_rgb, args.hw);
-
-    let mut frames_yuv = hw_device_ctx
-        .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12)
-        .unwrap();
-
-    enc.set_bit_rate(40_000_000);
-    enc.set_width(3840);
-    enc.set_height(2160);
-    // enc.set_time_base(filter_timebase);
-    enc.set_time_base((1, 120));
-    enc.set_frame_rate(Some((120, 1)));
-    enc.set_flags(codec::Flags::GLOBAL_HEADER);
-
-    if args.hw {
-        enc.set_format(Pixel::VAAPI);
-
-        unsafe {
-            (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-            (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-            (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
-        }
-    } else {
-        enc.set_format(Pixel::NV12);
-    }
-
-    println!("{}", filter.dump());
-
-    ost.set_parameters(&enc);
-    // enc.set_parameters(ost.parameters()).unwrap();
-
-    let octx_time_base = ost.time_base();
-
-    unsafe {
-        dbg!((*enc.as_mut_ptr()).time_base.num);
-        dbg!((*enc.as_mut_ptr()).time_base.den);
-    }
-
-    let opts = if args.hw {
-        dict! {
-            // "profile" => "high",
-            "low_power" => "1"
-        }
-    } else {
-        dict! {
-            "preset" => "ultrafast"
-        }
-    };
-
-    let mut enc = enc.open_with(opts).unwrap();
-
-    ffmpeg_next::format::context::output::dump(&octx, 0, Some(&"out.avi"));
-    octx.write_header().unwrap();
-
-    let (frame_send, frame_recv) = bounded(10);
-
     let (globals, mut queue) = registry_queue_init(&conn).unwrap();
 
     let mut disp_name = None;
@@ -734,26 +833,17 @@ fn main() {
         }
     }
 
-    let mut enc_state = EncState {
-        frame_recv,
-        filter,
-        enc,
-        filter_output_timebase: filter_timebase,
-        octx_time_base,
-        octx,
-        last_pts: 0,
-        vid_stream_idx,
-    };
-
     let mut state = State::new(
         &display,
         &queue.handle(),
         &globals,
         disp_name.unwrap(),
         // running,
-        frames_rgb,
         // frame_send,
-        enc_state,
+        // enc_state,
+        args.geometry,
+        args.output,
+        args.hw,
     );
 
     // let enc_thread = std::thread::spawn(move || {
@@ -768,9 +858,9 @@ fn main() {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
-    state.enc.flush();
-    // drop(state); // causes thread to quit
-    // enc_thread.join().unwrap();
+    if let Some(enc) = &mut state.enc {
+        enc.flush();
+    }
 }
 
 #[cfg(test)]

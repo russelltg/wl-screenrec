@@ -15,4 +15,5 @@ ffmpeg-next = "5.1.1"
 ctrlc = "3.2.4"
 gbm = "0.11.0"
 crossbeam = { version = "0.8.2", features = ["crossbeam-channel"] }
+thiserror = "1.0.38"
 
