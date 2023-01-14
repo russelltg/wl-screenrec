@@ -301,7 +301,7 @@ impl Dispatch<WlBuffer, ()> for State {
     fn event(
         _state: &mut Self,
         _proxy: &WlBuffer,
-        event: <WlBuffer as Proxy>::Event,
+        _event: <WlBuffer as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -313,7 +313,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
     fn event(
         _state: &mut Self,
         _proxy: &WlRegistry,
-        event: <WlRegistry as Proxy>::Event,
+        _event: <WlRegistry as Proxy>::Event,
         _data: &GlobalListContents,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -325,7 +325,7 @@ impl Dispatch<WlRegistry, ()> for State {
     fn event(
         _state: &mut Self,
         _proxy: &WlRegistry,
-        event: <WlRegistry as Proxy>::Event,
+        _event: <WlRegistry as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -442,20 +442,6 @@ impl State {
                     },
                 );
             }
-            // if g.interface == WlOutput::interface().name {
-            //     let output: WlOutput =
-            //         registry.bind(g.name, WlOutput::interface().version, eq, g.name);
-
-            //     partial_outputs.insert(
-            //         g.name,
-            //         PartialOutputInfo {
-            //             name: None,
-            //             loc: None,
-            //             size: None,
-            //             output,
-            //         },
-            //     );
-            // }
         }
 
         State {
