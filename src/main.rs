@@ -1,7 +1,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     ffi::c_int,
     num::ParseIntError,
     ptr::null_mut,
@@ -36,9 +36,15 @@ use wayland_client::{
     },
     Connection, Dispatch, Proxy, QueueHandle,
 };
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-    zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+use wayland_protocols::{
+    wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    },
+    xdg::xdg_output::zv1::client::{
+        zxdg_output_manager_v1::ZxdgOutputManagerV1,
+        zxdg_output_v1::{self, ZxdgOutputV1},
+    },
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -52,10 +58,18 @@ struct Args {
     hw: bool,
 
     #[clap(long, short, default_value = "screenrecord.avi")]
-    output: String,
+    filename: String,
 
-    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`")]
+    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output")]
     geometry: Option<(u32, u32, u32, u32)>,
+
+    #[clap(
+        long,
+        short,
+        help = "Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one",
+        default_value = ""
+    )]
+    output: String,
 }
 
 #[derive(Error, Debug)]
@@ -138,8 +152,35 @@ fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
     }
 }
 
+struct PartialOutputInfo {
+    name: Option<String>,
+    loc: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
+    output: WlOutput,
+}
+impl PartialOutputInfo {
+    fn complete(&self) -> Option<OutputInfo> {
+        if let (Some(name), Some(loc), Some(size)) = (&self.name, &self.loc, &self.size) {
+            Some(OutputInfo {
+                loc: *loc,
+                name: name.clone(),
+                size: *size,
+                output: self.output.clone(),
+            })
+        } else {
+            None
+        }
+    }
+}
+
+struct OutputInfo {
+    name: String,
+    loc: (i32, i32),
+    size: (i32, i32),
+    output: WlOutput,
+}
+
 struct State {
-    // dims: Option<(i32, i32)>,
     surfaces_owned_by_compositor: VecDeque<(
         frame::Video,
         video::Video,
@@ -147,22 +188,15 @@ struct State {
         ZwlrScreencopyFrameV1,
         WlBuffer,
     )>,
-    // free_surfaces: Vec<VaSurface>,
-
-    // va_dpy: *mut c_void,
-    // va_context: u32,
     dma: ZwpLinuxDmabufV1,
     screencopy_manager: ZwlrScreencopyManagerV1,
-    // capture: ZwlrScreencopyFrameV1,
-    wl_output: WlOutput,
-    // running: Arc<AtomicBool>,
-    // frame_send: crossbeam::channel::Sender<VaSurface>,
+    wl_output: Option<WlOutput>,
     enc: Option<EncState>,
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
-    geometry: Option<(u32, u32, u32, u32)>,
-    output: String,
-    hw: bool,
+    args: Args,
+    partial_outputs: BTreeMap<u32, PartialOutputInfo>,
+    outputs: BTreeMap<u32, OutputInfo>,
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -223,8 +257,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     state.starting_timestamp = Some(pts);
                 }
 
-                surf
-                    .set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                surf.set_pts(Some(pts - state.starting_timestamp.unwrap()));
                 unsafe {
                     (*surf.as_mut_ptr()).time_base.num = 1;
                     (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
@@ -308,39 +341,64 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-impl Dispatch<WlOutput, ()> for State {
+impl Dispatch<WlOutput, u32> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlOutput,
+        _event: <WlOutput as Proxy>::Event,
+        _data: &u32,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZxdgOutputManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZxdgOutputManagerV1,
+        _event: <ZxdgOutputManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        todo!()
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, u32> for State {
     fn event(
         state: &mut Self,
-        _proxy: &WlOutput,
-        event: <WlOutput as Proxy>::Event,
-        _data: &(),
+        _proxy: &ZxdgOutputV1,
+        event: <ZxdgOutputV1 as Proxy>::Event,
+        data: &u32,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            wl_output::Event::Mode {
-                width,
-                height,
-                ..
-            } => {
-                if state.enc.is_none() {
-                    let (enc_x, enc_y, enc_w, enc_h) = if let Some((x, y, w, h)) = state.geometry {
-                        (x as i32, y as i32, w as i32, h as i32)
-                    } else {
-                        (0, 0, width, height)
-                    };
-                    state.enc = Some(EncState::new(
-                        &state.output,
-                        state.hw,
-                        width,
-                        height,
-                        enc_x,
-                        enc_y,
-                        enc_w,
-                        enc_h,
-                    ));
-                    state.queue_copy(qhandle);
+            zxdg_output_v1::Event::Name { name } => {
+                let output = state.partial_outputs.get_mut(data).unwrap();
+                output.name = Some(name);
+                if let Some(info) = output.complete() {
+                    state.outputs.insert(*data, info);
                 }
+                state.start_if_output_probe_complete(qhandle);
+            }
+            zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                let output = state.partial_outputs.get_mut(data).unwrap();
+                output.loc = Some((x, y));
+                if let Some(info) = output.complete() {
+                    state.outputs.insert(*data, info);
+                }
+                state.start_if_output_probe_complete(qhandle);
+            }
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                let output = state.partial_outputs.get_mut(data).unwrap();
+                output.size = Some((width, height));
+                if let Some(info) = output.complete() {
+                    state.outputs.insert(*data, info);
+                }
+                state.start_if_output_probe_complete(qhandle);
             }
             _ => {
                 dbg!(event);
@@ -350,17 +408,7 @@ impl Dispatch<WlOutput, ()> for State {
 }
 
 impl State {
-    fn new(
-        display: &WlDisplay,
-        eq: &QueueHandle<State>,
-        gm: &GlobalList,
-        wl_output_name: u32,
-
-        // x y w h
-        geometry: Option<(u32, u32, u32, u32)>,
-        output: String,
-        hw: bool,
-    ) -> Self {
+    fn new(display: &WlDisplay, eq: &QueueHandle<State>, gm: &GlobalList, args: Args) -> Self {
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(
                 &eq,
@@ -380,20 +428,58 @@ impl State {
 
         let registry = display.get_registry(eq, ());
 
-        let wl_output: WlOutput =
-            registry.bind(wl_output_name, WlOutput::interface().version, eq, ());
+        let xdg_output_man: ZxdgOutputManagerV1 = gm
+            .bind(
+                &eq,
+                ZxdgOutputManagerV1::interface().version..=ZxdgOutputManagerV1::interface().version,
+                (),
+            )
+            .unwrap();
+        let mut partial_outputs = BTreeMap::new();
+        for g in gm.contents().clone_list() {
+            if g.interface == WlOutput::interface().name {
+                let output: WlOutput =
+                    registry.bind(g.name, WlOutput::interface().version, eq, g.name);
+
+                let _xdg = xdg_output_man.get_xdg_output(&output, eq, g.name);
+
+                partial_outputs.insert(
+                    g.name,
+                    PartialOutputInfo {
+                        name: None,
+                        loc: None,
+                        size: None,
+                        output,
+                    },
+                );
+            }
+            // if g.interface == WlOutput::interface().name {
+            //     let output: WlOutput =
+            //         registry.bind(g.name, WlOutput::interface().version, eq, g.name);
+
+            //     partial_outputs.insert(
+            //         g.name,
+            //         PartialOutputInfo {
+            //             name: None,
+            //             loc: None,
+            //             size: None,
+            //             output,
+            //         },
+            //     );
+            // }
+        }
 
         State {
             surfaces_owned_by_compositor: VecDeque::new(),
             dma,
             screencopy_manager: man,
-            wl_output,
             enc: None,
             starting_timestamp: None,
             fps_counter: FpsCounter::new(),
-            geometry,
-            output,
-            hw,
+            args,
+            wl_output: None,
+            partial_outputs,
+            outputs: BTreeMap::new(),
         }
     }
 
@@ -427,14 +513,94 @@ impl State {
             (),
         );
 
-        let capture = self
-            .screencopy_manager
-            .capture_output(1, &self.wl_output, &eq, ());
+        let capture =
+            self.screencopy_manager
+                .capture_output(1, self.wl_output.as_ref().unwrap(), &eq, ());
 
         capture.copy_with_damage(&buf);
 
         self.surfaces_owned_by_compositor
             .push_back((surf, mapping, dma_params, capture, buf));
+    }
+
+    fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
+        assert!(self.enc.is_none());
+
+        if self.outputs.len() != self.partial_outputs.len() {
+            // probe not complete
+            return;
+        }
+
+        let (output, (x, y), (w, h)) = match (self.args.geometry, self.args.output.as_str()) {
+            (None, "") => {
+                // default case, capture whole monitor
+                if self.outputs.len() != 1 {
+                    println!("multiple displays and no --geometry or --output supplied, bailing");
+                    RUNNING.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                let output = self.outputs.iter().next().unwrap().1;
+                (output.clone(), (0, 0), output.size)
+            }
+            (None, disp) => {
+                // --output but no --geoemetry
+                if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
+                    (output.clone(), (0, 0), output.size)
+                } else {
+                    println!("display {} not found, bailing", disp);
+                    RUNNING.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            (Some((x, y, w, h)), "") => {
+                let x = x as i32;
+                let y = y as i32;
+                let w = w as i32;
+                let h = h as i32;
+                // --geometry but no --output
+                if let Some((_, output)) = self.outputs.iter().find(
+                    |(_, i)| {
+                        dbg!(x >= i.loc.0) && dbg!(dbg!(x + w) <= dbg!(i.loc.0 + i.size.0)) && // x within
+                    dbg!(y >= i.loc.1) && dbg!(y + h <= i.loc.1 + i.size.1)
+                    }, // y within
+                ) {
+                    (output.clone(), (x - output.loc.0, y - output.loc.1), (w, h))
+                } else {
+                    println!(
+                        "region {},{} {}x{} is not entirely within one output, bailing",
+                        x, y, w, h
+                    );
+                    RUNNING.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            (Some(_), _) => {
+                println!("both --geometry and --output were passed, which is not allowed, bailing");
+                RUNNING.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+
+        println!("Using output {}", output.name);
+
+        // let (enc_x, enc_y, enc_w, enc_h) = if let Some((x, y, w, h)) = self.args.geometry {
+        //     (x as i32, y as i32, w as i32, h as i32)
+        // } else {
+        //     (0, 0, width, height)
+        // };
+        self.wl_output = Some(output.output.clone());
+        self.enc = Some(EncState::new(
+            &self.args.filename,
+            self.args.hw,
+            output.size.0,
+            output.size.1,
+            x,
+            y,
+            w,
+            h,
+        ));
+        self.queue_copy(qhandle);
     }
 }
 
@@ -593,12 +759,7 @@ impl EncState {
     }
 
     fn push(&mut self, surf: frame::Video) {
-        self.filter
-            .get("in")
-            .unwrap()
-            .source()
-            .add(&surf)
-            .unwrap();
+        self.filter.get("in").unwrap().source().add(&surf).unwrap();
 
         self.process_ready();
     }
@@ -783,9 +944,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for RegistryHandler {
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
         if let wl_registry::Event::Global {
-            name,
-            interface,
-            ..
+            name, interface, ..
         } = event
         {
             if interface == wl_output::WlOutput::interface().name {
@@ -816,22 +975,11 @@ fn main() {
 
     let (globals, mut queue) = registry_queue_init(&conn).unwrap();
 
-    let mut disp_name = None;
-    for g in globals.contents().clone_list() {
-        if g.interface == WlOutput::interface().name {
-            assert_eq!(disp_name, None);
-            disp_name = Some(g.name);
-        }
-    }
-
     let mut state = State::new(
         &display,
         &queue.handle(),
         &globals,
-        disp_name.unwrap(),
-        args.geometry,
-        args.output,
-        args.hw,
+        args,
     );
 
     // TODO: detect formats
