@@ -24,11 +24,12 @@ use ffmpeg::{
     color::Range,
     dict, encoder,
     ffi::{
-        av_buffer_get_ref_count, av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc,
-        av_buffersrc_parameters_set, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, av_opt_set, av_rescale,
-        av_rescale_q, avcodec_alloc_context3, AVDRMFrameDescriptor, AVHWFramesContext,
-        AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        av_buffer_ref, av_buffer_unref, av_buffersink_params_alloc,
+        av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
+        av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init, av_hwframe_get_buffer,
+        av_hwframe_map, av_opt_set, av_rescale, av_rescale_q, avcodec_alloc_context3,
+        AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ,
+        AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Output, Pixel},
@@ -341,11 +342,21 @@ impl Dispatch<WlOutput, ()> for State {
                 refresh,
             } => {
                 if state.enc.is_none() {
-                    let (w, h) = match state.geometry {
-                        Some((_, _, w, h)) => (w as i32, h as i32),
-                        None => (width, height),
+                    let (enc_x, enc_y, enc_w, enc_h) = if let Some((x, y, w, h)) = state.geometry {
+                        (x as i32, y as i32, w as i32, h as i32)
+                    } else {
+                        (0, 0, width, height)
                     };
-                    state.enc = Some(EncState::new(&state.output, state.hw, w, h));
+                    state.enc = Some(EncState::new(
+                        &state.output,
+                        state.hw,
+                        width,
+                        height,
+                        enc_x,
+                        enc_y,
+                        enc_w,
+                        enc_h,
+                    ));
                     state.queue_copy(qhandle);
                 }
             }
@@ -365,6 +376,8 @@ impl State {
         // running: Arc<AtomicBool>,
         // frames_rgb: AvHwFrameCtx,
         // frame_send: Sender<VaSurface>,
+
+        // x y w h
         geometry: Option<(u32, u32, u32, u32)>,
         output: String,
         hw: bool,
@@ -434,7 +447,7 @@ impl State {
             u32::from_be_bytes(modifier[4..].try_into().unwrap()),
         );
 
-        let (w, h) = enc.size;
+        let (w, h) = enc.capture_size;
         let buf = dma_params.create_immed(
             w,
             h,
@@ -446,21 +459,9 @@ impl State {
 
         // dma_params.destroy();
 
-        let capture = if let Some((x, y, sx, sy)) = self.geometry {
-            self.screencopy_manager.capture_output_region(
-                1,
-                &self.wl_output,
-                x as i32,
-                y as i32,
-                sx as i32,
-                sy as i32,
-                &eq,
-                (),
-            )
-        } else {
-            self.screencopy_manager
-                .capture_output(1, &self.wl_output, &eq, ())
-        };
+        let capture = self
+            .screencopy_manager
+            .capture_output(1, &self.wl_output, &eq, ());
 
         capture.copy_with_damage(&buf);
 
@@ -479,11 +480,21 @@ struct EncState {
     octx_time_base: Rational,
     last_pts: i64,
     vid_stream_idx: usize,
-    size: (i32, i32),
+    capture_size: (i32, i32),
+    encode_rect: (i32, i32, i32, i32),
 }
 
 impl EncState {
-    fn new(output: &str, hw: bool, w: i32, h: i32) -> Self {
+    fn new(
+        output: &str,
+        hw: bool,
+        capture_w: i32,
+        capture_h: i32,
+        encode_x: i32,
+        encode_y: i32,
+        encode_w: i32,
+        encode_h: i32,
+    ) -> Self {
         let mut octx = ffmpeg_next::format::output(&output).unwrap();
 
         let mut ost = octx
@@ -505,18 +516,19 @@ impl EncState {
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva();
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, w, h)
+            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
             .unwrap();
 
-        let (mut filter, filter_timebase) = filter(&frames_rgb, hw, w, h);
+        let (mut filter, filter_timebase) =
+            filter(&frames_rgb, hw, capture_w, capture_h, encode_w, encode_h);
 
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, w, h)
+            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, encode_w, encode_h)
             .unwrap();
 
         enc.set_bit_rate(40_000_000);
-        enc.set_width(w as u32);
-        enc.set_height(h as u32);
+        enc.set_width(encode_w as u32);
+        enc.set_height(encode_h as u32);
         enc.set_time_base((1, 120));
         enc.set_frame_rate(Some((120, 1)));
         enc.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -568,7 +580,8 @@ impl EncState {
             last_pts: 0,
             vid_stream_idx,
             frames_rgb,
-            size: (w, h),
+            capture_size: (capture_w, capture_h),
+            encode_rect: (encode_x, encode_y, encode_w, encode_h),
         }
     }
     fn process_ready(&mut self) {
@@ -616,7 +629,30 @@ impl EncState {
     //     self.flush();
     // }
 
-    fn push(&mut self, surf: VaSurface) {
+    fn push(&mut self, mut surf: VaSurface) {
+        let (x, y, w, h) = self.encode_rect;
+
+        unsafe {
+            let f = &mut (*surf.f.as_mut_ptr());
+            f.crop_left = x as usize;
+            f.crop_right = (self.capture_size.0 - w - x) as usize;
+
+            f.crop_top = y as usize;
+            f.crop_bottom = (self.capture_size.1 - h - y) as usize;
+
+            println!(
+                "in={}x{} -> {}x{} ({},{},{},{})",
+                self.capture_size.0,
+                self.capture_size.1,
+                w,
+                h,
+                f.crop_left,
+                f.crop_right,
+                f.crop_top,
+                f.crop_bottom
+            );
+        }
+
         self.filter
             .get("in")
             .unwrap()
@@ -725,7 +761,14 @@ impl AvHwFrameCtx {
     }
 }
 
-fn filter(inctx: &AvHwFrameCtx, hw: bool, width: i32, height: i32) -> (filter::Graph, Rational) {
+fn filter(
+    inctx: &AvHwFrameCtx,
+    hw: bool,
+    capture_width: i32,
+    capture_height: i32,
+    enc_width: i32,
+    enc_height: i32,
+) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
         &filter::find("buffer").unwrap(),
@@ -740,8 +783,8 @@ fn filter(inctx: &AvHwFrameCtx, hw: bool, width: i32, height: i32) -> (filter::G
     unsafe {
         let p = &mut *av_buffersrc_parameters_alloc();
 
-        p.width = width;
-        p.height = height;
+        p.width = capture_width;
+        p.height = capture_height;
         p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
         p.time_base.num = 1;
         p.time_base.den = 1_000_000_000;
@@ -768,8 +811,10 @@ fn filter(inctx: &AvHwFrameCtx, hw: bool, width: i32, height: i32) -> (filter::G
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "scale_vaapi=format=nv12{}",
-            if hw { "" } else { ", hwdownload" }
+            "scale_vaapi=format=nv12{}:w={}:h={}",
+            if hw { "" } else { ", hwdownload" },
+            enc_width,
+            enc_height
         ))
         .unwrap();
 
@@ -860,21 +905,5 @@ fn main() {
 
     if let Some(enc) = &mut state.enc {
         enc.flush();
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn free_vaapi() {
-        let mut hw = AvHwDevCtx::new_libva();
-        let mut framectx = hw.create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0).unwrap();
-
-        for _ in 0..100 {
-            let f = framectx.alloc().unwrap();
-            drop(f);
-        }
     }
 }
