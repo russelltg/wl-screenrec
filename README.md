@@ -37,5 +37,5 @@ wl-screenrec -g "0,0 128x128" # manual region
 # Known issues
 
 - Cannot capture a region that spans more than one display. This is probably possible but quite difficult, espeicially with potential differences in refresh rate. Probably will never be supported.
-- Has some memory leaks. I'll eventually figure them out probably. I'm not super familar with the ffmpeg api, and the ffmpeg-next isn't complete enough for this project, so it uses a combination of ffmpeg-next and the C ffi.
+- Has some at-exit memory leaks. I'll eventually figure them out probably. I'm not super familar with the ffmpeg api, and the ffmpeg-next isn't complete enough for this project, so it uses a combination of ffmpeg-next and the C ffi.
 - For some reason mp4 output seems to be broken. AVI works great. I have no idea why!
