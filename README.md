@@ -12,6 +12,25 @@ if there are issues or if you've tested in on AMD/Nvidia and you want to update 
 
 ## From source using cargo
 
+Install ffmpeg, which is a required dependency.
+
 ```bash
-cargo install --git https://github.com/russelltg/wl-screenrec`
+cargo install --git https://github.com/russelltg/wl-screenrec
 ```
+
+# Usage
+
+Capture entire output:
+
+```bash
+wl-screenrec         # valid when you only have one output
+wl-screenrec -o DP-1 # specify outuput
+```
+
+Capture region:
+
+```bash
+wl-screenrec -g "$(slurp)"    # use slurp
+wl-screenrec -g "0,0 128x128" # manual region
+```
+
