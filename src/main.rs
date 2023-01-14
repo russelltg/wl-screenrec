@@ -119,35 +119,29 @@ impl FpsCounter {
     }
 }
 
-struct VaSurface {
-    f: video::Video,
-}
+fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
+    let mut dst = video::Video::empty();
+    dst.set_format(Pixel::DRM_PRIME);
 
-impl VaSurface {
-    fn map(&mut self) -> (AVDRMFrameDescriptor, video::Video) {
-        let mut dst = video::Video::empty();
-        dst.set_format(Pixel::DRM_PRIME);
+    unsafe {
+        let sts = av_hwframe_map(
+            dst.as_mut_ptr(),
+            frame.as_ptr(),
+            AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
+        );
+        assert_eq!(sts, 0);
 
-        unsafe {
-            let sts = av_hwframe_map(
-                dst.as_mut_ptr(),
-                self.f.as_ptr(),
-                AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
-            );
-            assert_eq!(sts, 0);
-
-            (
-                *((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor),
-                dst,
-            )
-        }
+        (
+            *((*dst.as_ptr()).data[0] as *const AVDRMFrameDescriptor),
+            dst,
+        )
     }
 }
 
 struct State {
     // dims: Option<(i32, i32)>,
     surfaces_owned_by_compositor: VecDeque<(
-        VaSurface,
+        frame::Video,
         video::Video,
         ZwpLinuxBufferParamsV1,
         ZwlrScreencopyFrameV1,
@@ -229,11 +223,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     state.starting_timestamp = Some(pts);
                 }
 
-                surf.f
+                surf
                     .set_pts(Some(pts - state.starting_timestamp.unwrap()));
                 unsafe {
-                    (*surf.f.as_mut_ptr()).time_base.num = 1;
-                    (*surf.f.as_mut_ptr()).time_base.den = 1_000_000_000;
+                    (*surf.as_mut_ptr()).time_base.num = 1;
+                    (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
                 }
 
                 state.enc.as_mut().unwrap().push(surf);
@@ -405,9 +399,9 @@ impl State {
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
         let enc = self.enc.as_mut().unwrap();
-        let mut surf = enc.frames_rgb.alloc().unwrap();
+        let surf = enc.frames_rgb.alloc().unwrap();
 
-        let (desc, mapping) = surf.map();
+        let (desc, mapping) = map_drm(&surf);
 
         let modifier = desc.objects[0].format_modifier.to_be_bytes();
         let stride = desc.layers[0].planes[0].pitch as u32;
@@ -433,8 +427,6 @@ impl State {
             (),
         );
 
-        // dma_params.destroy();
-
         let capture = self
             .screencopy_manager
             .capture_output(1, &self.wl_output, &eq, ());
@@ -451,7 +443,6 @@ struct EncState {
     enc: encoder::Video,
     octx: format::context::Output,
     frames_rgb: AvHwFrameCtx,
-    // frame_recv: crossbeam::channel::Receiver<VaSurface>,
     filter_output_timebase: Rational,
     octx_time_base: Rational,
     vid_stream_idx: usize,
@@ -601,12 +592,12 @@ impl EncState {
         self.octx.write_trailer().unwrap();
     }
 
-    fn push(&mut self, surf: VaSurface) {
+    fn push(&mut self, surf: frame::Video) {
         self.filter
             .get("in")
             .unwrap()
             .source()
-            .add(&surf.f)
+            .add(&surf)
             .unwrap();
 
         self.process_ready();
@@ -699,12 +690,12 @@ impl Drop for AvHwFrameCtx {
 static CTR: AtomicU32 = AtomicU32::new(0);
 
 impl AvHwFrameCtx {
-    fn alloc(&mut self) -> Result<VaSurface, Error> {
+    fn alloc(&mut self) -> Result<frame::Video, Error> {
         let id = CTR.fetch_add(1, Ordering::SeqCst);
 
         let mut frame = ffmpeg_next::frame::video::Video::empty();
         match unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) } {
-            0 => Ok(VaSurface { f: frame }),
+            0 => Ok(frame),
             e => Err(Error::from(e)),
         }
     }
