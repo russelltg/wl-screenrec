@@ -520,7 +520,7 @@ impl EncState {
             .unwrap();
 
         let (mut filter, filter_timebase) =
-            filter(&frames_rgb, hw, capture_w, capture_h, encode_w, encode_h);
+            filter(&frames_rgb, hw, capture_w, capture_h, encode_x, encode_y, encode_w, encode_h);
 
         let mut frames_yuv = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, encode_w, encode_h)
@@ -632,26 +632,6 @@ impl EncState {
     fn push(&mut self, mut surf: VaSurface) {
         let (x, y, w, h) = self.encode_rect;
 
-        unsafe {
-            let f = &mut (*surf.f.as_mut_ptr());
-            f.crop_left = x as usize;
-            f.crop_right = (self.capture_size.0 - w - x) as usize;
-
-            f.crop_top = y as usize;
-            f.crop_bottom = (self.capture_size.1 - h - y) as usize;
-
-            println!(
-                "in={}x{} -> {}x{} ({},{},{},{})",
-                self.capture_size.0,
-                self.capture_size.1,
-                w,
-                h,
-                f.crop_left,
-                f.crop_right,
-                f.crop_top,
-                f.crop_bottom
-            );
-        }
 
         self.filter
             .get("in")
@@ -766,6 +746,8 @@ fn filter(
     hw: bool,
     capture_width: i32,
     capture_height: i32,
+    enc_x: i32,
+    enc_y: i32,
     enc_width: i32,
     enc_height: i32,
 ) -> (filter::Graph, Rational) {
@@ -811,7 +793,8 @@ fn filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "scale_vaapi=format=nv12{}:w={}:h={}",
+            "crop={}:{}:{}:{},scale_vaapi=format=nv12{}:w={}:h={}",
+            enc_width, enc_height, enc_x, enc_y, 
             if hw { "" } else { ", hwdownload" },
             enc_width,
             enc_height
