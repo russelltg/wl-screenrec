@@ -909,36 +909,7 @@ fn filter(
     (g, Rational::new(1, 1_000_000_000))
 }
 
-struct RegistryHandler {
-    output_names: Vec<u32>,
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for RegistryHandler {
-    fn event(
-        state: &mut Self,
-        _proxy: &wl_registry::WlRegistry,
-        event: <wl_registry::WlRegistry as wayland_client::Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &wayland_client::QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global {
-            name, interface, ..
-        } = event
-        {
-            if interface == wl_output::WlOutput::interface().name {
-                state.output_names.push(name);
-            }
-        }
-    }
-}
-
 static RUNNING: AtomicBool = AtomicBool::new(true);
-
-#[no_mangle]
-extern "C" fn quit() {
-    RUNNING.store(false, Ordering::SeqCst);
-}
 
 fn main() {
     ctrlc::set_handler(move || RUNNING.store(false, Ordering::SeqCst)).unwrap();
