@@ -34,7 +34,7 @@ use wayland_client::{
         wl_output::{self, WlOutput},
         wl_registry::{self, WlRegistry},
     },
-    Connection, Dispatch, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::{
     wp::linux_dmabuf::zv1::client::{
@@ -75,7 +75,7 @@ struct Args {
     verbose: bool,
 
     #[clap(long, default_value = "/dev/dri/card0")]
-    dri_device: String
+    dri_device: String,
 }
 
 #[derive(Error, Debug)]
@@ -400,7 +400,12 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
 }
 
 impl State {
-    fn new(display: &WlDisplay, eq: &QueueHandle<State>, gm: &GlobalList, args: Args) -> Self {
+    fn new(conn: &Connection, args: Args) -> (Self, EventQueue<Self>) {
+        let display = conn.display();
+
+        let (gm, mut queue) = registry_queue_init(&conn).unwrap();
+        let eq: QueueHandle<State> = queue.handle();
+
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(
                 &eq,
@@ -418,7 +423,7 @@ impl State {
             )
             .unwrap();
 
-        let registry = display.get_registry(eq, ());
+        let registry = display.get_registry(&eq, ());
 
         let xdg_output_man: ZxdgOutputManagerV1 = gm
             .bind(
@@ -431,9 +436,9 @@ impl State {
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
                 let output: WlOutput =
-                    registry.bind(g.name, WlOutput::interface().version, eq, g.name);
+                    registry.bind(g.name, WlOutput::interface().version, &eq, g.name);
 
-                let _xdg = xdg_output_man.get_xdg_output(&output, eq, g.name);
+                let _xdg = xdg_output_man.get_xdg_output(&output, &eq, g.name);
 
                 partial_outputs.insert(
                     g.name,
@@ -447,18 +452,21 @@ impl State {
             }
         }
 
-        State {
-            surfaces_owned_by_compositor: VecDeque::new(),
-            dma,
-            screencopy_manager: man,
-            enc: None,
-            starting_timestamp: None,
-            fps_counter: FpsCounter::new(),
-            args,
-            wl_output: None,
-            partial_outputs,
-            outputs: BTreeMap::new(),
-        }
+        (
+            State {
+                surfaces_owned_by_compositor: VecDeque::new(),
+                dma,
+                screencopy_manager: man,
+                enc: None,
+                starting_timestamp: None,
+                fps_counter: FpsCounter::new(),
+                args,
+                wl_output: None,
+                partial_outputs,
+                outputs: BTreeMap::new(),
+            },
+            queue,
+        )
     }
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
@@ -571,7 +579,7 @@ impl State {
             w,
             h,
             self.args.verbose,
-            &self.args.dri_device
+            &self.args.dri_device,
         ));
         self.queue_copy(qhandle);
     }
@@ -946,13 +954,9 @@ fn main() {
     let args = Args::parse();
 
     let conn = Connection::connect_to_env().unwrap();
-    let display = conn.display();
 
-    let (globals, mut queue) = registry_queue_init(&conn).unwrap();
+    let (mut state, mut queue) = State::new(&conn, args);
 
-    let mut state = State::new(&display, &queue.handle(), &globals, args);
-
-    // TODO: detect formats
     while RUNNING.load(Ordering::SeqCst) {
         queue.blocking_dispatch(&mut state).unwrap();
     }
