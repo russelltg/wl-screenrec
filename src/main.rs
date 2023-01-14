@@ -5,7 +5,7 @@ use std::{
     ffi::{c_int, CString},
     num::ParseIntError,
     ptr::null_mut,
-    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -27,10 +27,9 @@ use ffmpeg::{
 };
 use thiserror::Error;
 use wayland_client::{
-    globals::{registry_queue_init, GlobalList, GlobalListContents},
+    globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
-        wl_display::WlDisplay,
         wl_output::{self, WlOutput},
         wl_registry::{self, WlRegistry},
     },
@@ -81,36 +80,36 @@ struct Args {
 #[derive(Error, Debug)]
 enum ParseGeometryError {
     #[error("invalid integer")]
-    BadInt(#[from] ParseIntError),
+    Int(#[from] ParseIntError),
     #[error("invalid geometry string")]
-    BadStructure,
+    Structure,
     #[error("invalid location string")]
-    BadLocation,
+    Location,
     #[error("invalid size string")]
-    BadSize,
+    Size,
 }
 
 fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
     use ParseGeometryError::*;
     let mut it = s.split(' ');
-    let loc = it.next().ok_or(BadStructure)?;
-    let size = it.next().ok_or(BadStructure)?;
+    let loc = it.next().ok_or(Structure)?;
+    let size = it.next().ok_or(Structure)?;
     if it.next().is_some() {
-        return Err(BadStructure);
+        return Err(Structure);
     }
 
-    let mut it = loc.split(",");
-    let startx = it.next().ok_or(BadLocation)?.parse()?;
-    let starty = it.next().ok_or(BadLocation)?.parse()?;
+    let mut it = loc.split(',');
+    let startx = it.next().ok_or(Location)?.parse()?;
+    let starty = it.next().ok_or(Location)?.parse()?;
     if it.next().is_some() {
-        return Err(BadLocation);
+        return Err(Location);
     }
 
-    let mut it = size.split("x");
-    let sizex = it.next().ok_or(BadSize)?.parse()?;
-    let sizey = it.next().ok_or(BadSize)?.parse()?;
+    let mut it = size.split('x');
+    let sizex = it.next().ok_or(Size)?.parse()?;
+    let sizey = it.next().ok_or(Size)?.parse()?;
     if it.next().is_some() {
-        return Err(BadSize);
+        return Err(Size);
     }
 
     Ok((startx, starty, sizex, sizey))
@@ -403,7 +402,7 @@ impl State {
     fn new(conn: &Connection, args: Args) -> (Self, EventQueue<Self>) {
         let display = conn.display();
 
-        let (gm, mut queue) = registry_queue_init(&conn).unwrap();
+        let (gm, queue) = registry_queue_init(conn).unwrap();
         let eq: QueueHandle<State> = queue.handle();
 
         let man: ZwlrScreencopyManagerV1 = gm
@@ -501,7 +500,7 @@ impl State {
 
         let capture =
             self.screencopy_manager
-                .capture_output(1, self.wl_output.as_ref().unwrap(), &eq, ());
+                .capture_output(1, self.wl_output.as_ref().unwrap(), eq, ());
 
         capture.copy_with_damage(&buf);
 
@@ -527,12 +526,12 @@ impl State {
                 }
 
                 let output = self.outputs.iter().next().unwrap().1;
-                (output.clone(), (0, 0), output.size)
+                (output, (0, 0), output.size)
             }
             (None, disp) => {
                 // --output but no --geoemetry
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
-                    (output.clone(), (0, 0), output.size)
+                    (output, (0, 0), output.size)
                 } else {
                     println!("display {} not found, bailing", disp);
                     RUNNING.store(false, Ordering::SeqCst);
@@ -549,7 +548,7 @@ impl State {
                     x >= i.loc.0 && x + w <= i.loc.0 + i.size.0 && // x within
                         y >= i.loc.1 && y + h <= i.loc.1 + i.size.1 // y within
                 }) {
-                    (output.clone(), (x - output.loc.0, y - output.loc.1), (w, h))
+                    (output, (x - output.loc.0, y - output.loc.1), (w, h))
                 } else {
                     println!(
                         "region {},{} {}x{} is not entirely within one output, bailing",
@@ -689,7 +688,7 @@ impl EncState {
         let enc = enc.open_with(opts).unwrap();
 
         if verbose {
-            ffmpeg_next::format::context::output::dump(&octx, 0, Some(&output));
+            ffmpeg_next::format::context::output::dump(&octx, 0, Some(output));
         }
 
         octx.write_header().unwrap();
@@ -761,10 +760,11 @@ impl AvHwDevCtx {
                 "connection_type" => "drm"
             };
 
+            let dev_cstr = CString::new(dri_device).unwrap();
             let sts = av_hwdevice_ctx_create(
                 &mut hw_device_ctx,
                 ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                CString::new(dri_device).unwrap().as_ptr(),
+                dev_cstr.as_ptr(),
                 opts.as_mut_ptr(),
                 0,
             );
@@ -831,12 +831,8 @@ impl Drop for AvHwFrameCtx {
     }
 }
 
-static CTR: AtomicU32 = AtomicU32::new(0);
-
 impl AvHwFrameCtx {
     fn alloc(&mut self) -> Result<frame::Video, Error> {
-        let id = CTR.fetch_add(1, Ordering::SeqCst);
-
         let mut frame = ffmpeg_next::frame::video::Video::empty();
         match unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) } {
             0 => Ok(frame),
