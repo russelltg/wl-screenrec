@@ -28,11 +28,7 @@ use ffmpeg::{
 use thiserror::Error;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{
-        wl_buffer::WlBuffer,
-        wl_output::{self, WlOutput},
-        wl_registry::{self, WlRegistry},
-    },
+    protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_registry::WlRegistry},
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::{
