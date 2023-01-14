@@ -2,7 +2,7 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    ffi::c_int,
+    ffi::{c_int, CString},
     num::ParseIntError,
     ptr::null_mut,
     sync::atomic::{AtomicBool, AtomicU32, Ordering},
@@ -73,6 +73,9 @@ struct Args {
 
     #[clap(long, short)]
     verbose: bool,
+
+    #[clap(long, default_value = "/dev/dri/card0")]
+    dri_device: String
 }
 
 #[derive(Error, Debug)]
@@ -567,7 +570,8 @@ impl State {
             y,
             w,
             h,
-            self.args.verbose
+            self.args.verbose,
+            &self.args.dri_device
         ));
         self.queue_copy(qhandle);
     }
@@ -595,6 +599,7 @@ impl EncState {
         encode_w: i32,
         encode_h: i32,
         verbose: bool,
+        dri_device: &str,
     ) -> Self {
         let mut octx = ffmpeg_next::format::output(&output).unwrap();
 
@@ -615,7 +620,7 @@ impl EncState {
                 .video()
                 .unwrap();
 
-        let mut hw_device_ctx = AvHwDevCtx::new_libva();
+        let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
         let frames_rgb = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
             .unwrap();
@@ -740,7 +745,7 @@ struct AvHwDevCtx {
 }
 
 impl AvHwDevCtx {
-    fn new_libva() -> Self {
+    fn new_libva(dri_device: &str) -> Self {
         unsafe {
             let mut hw_device_ctx = null_mut();
 
@@ -751,7 +756,7 @@ impl AvHwDevCtx {
             let sts = av_hwdevice_ctx_create(
                 &mut hw_device_ctx,
                 ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                &b"/dev/dri/card0\0"[0] as *const _ as *const _,
+                CString::new(dri_device).unwrap().as_ptr(),
                 opts.as_mut_ptr(),
                 0,
             );
