@@ -70,6 +70,9 @@ struct Args {
         default_value = ""
     )]
     output: String,
+
+    #[clap(long, short)]
+    verbose: bool,
 }
 
 #[derive(Error, Debug)]
@@ -277,9 +280,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 RUNNING.store(false, Ordering::SeqCst)
             }
 
-            _ => {
-                dbg!(event);
-            }
+            _ => {}
         }
     }
 }
@@ -293,7 +294,6 @@ impl Dispatch<ZwpLinuxBufferParamsV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        todo!()
     }
 }
 
@@ -306,12 +306,6 @@ impl Dispatch<WlBuffer, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wayland_client::protocol::wl_buffer::Event::Release => {}
-            _ => {
-                dbg!(event);
-            }
-        }
     }
 }
 
@@ -324,7 +318,6 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        dbg!(event);
     }
 }
 
@@ -337,7 +330,6 @@ impl Dispatch<WlRegistry, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        dbg!(event);
     }
 }
 
@@ -362,7 +354,6 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        todo!()
     }
 }
 
@@ -400,9 +391,7 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
                 }
                 state.start_if_output_probe_complete(qhandle);
             }
-            _ => {
-                dbg!(event);
-            }
+            _ => {}
         }
     }
 }
@@ -559,12 +548,10 @@ impl State {
                 let w = w as i32;
                 let h = h as i32;
                 // --geometry but no --output
-                if let Some((_, output)) = self.outputs.iter().find(
-                    |(_, i)| {
-                        dbg!(x >= i.loc.0) && dbg!(dbg!(x + w) <= dbg!(i.loc.0 + i.size.0)) && // x within
-                    dbg!(y >= i.loc.1) && dbg!(y + h <= i.loc.1 + i.size.1)
-                    }, // y within
-                ) {
+                if let Some((_, output)) = self.outputs.iter().find(|(_, i)| {
+                    x >= i.loc.0 && x + w <= i.loc.0 + i.size.0 && // x within
+                        y >= i.loc.1 && y + h <= i.loc.1 + i.size.1 // y within
+                }) {
                     (output.clone(), (x - output.loc.0, y - output.loc.1), (w, h))
                 } else {
                     println!(
@@ -584,11 +571,6 @@ impl State {
 
         println!("Using output {}", output.name);
 
-        // let (enc_x, enc_y, enc_w, enc_h) = if let Some((x, y, w, h)) = self.args.geometry {
-        //     (x as i32, y as i32, w as i32, h as i32)
-        // } else {
-        //     (0, 0, width, height)
-        // };
         self.wl_output = Some(output.output.clone());
         self.enc = Some(EncState::new(
             &self.args.filename,
@@ -599,6 +581,7 @@ impl State {
             y,
             w,
             h,
+            self.args.verbose
         ));
         self.queue_copy(qhandle);
     }
@@ -625,6 +608,7 @@ impl EncState {
         encode_y: i32,
         encode_w: i32,
         encode_h: i32,
+        verbose: bool,
     ) -> Self {
         let mut octx = ffmpeg_next::format::output(&output).unwrap();
 
@@ -684,16 +668,13 @@ impl EncState {
             enc.set_format(Pixel::NV12);
         }
 
-        println!("{}", filter.dump());
+        if verbose {
+            println!("{}", filter.dump());
+        }
 
         ost.set_parameters(&enc);
 
         let octx_time_base = ost.time_base();
-
-        unsafe {
-            dbg!((*enc.as_mut_ptr()).time_base.num);
-            dbg!((*enc.as_mut_ptr()).time_base.den);
-        }
 
         let opts = if hw {
             dict! {
@@ -708,7 +689,10 @@ impl EncState {
 
         let enc = enc.open_with(opts).unwrap();
 
-        ffmpeg_next::format::context::output::dump(&octx, 0, Some(&output));
+        if verbose {
+            ffmpeg_next::format::context::output::dump(&octx, 0, Some(&output));
+        }
+
         octx.write_header().unwrap();
         EncState {
             filter,
@@ -975,12 +959,7 @@ fn main() {
 
     let (globals, mut queue) = registry_queue_init(&conn).unwrap();
 
-    let mut state = State::new(
-        &display,
-        &queue.handle(),
-        &globals,
-        args,
-    );
+    let mut state = State::new(&display, &queue.handle(), &globals, args);
 
     // TODO: detect formats
     while RUNNING.load(Ordering::SeqCst) {
