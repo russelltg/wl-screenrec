@@ -912,9 +912,12 @@ fn main() {
 
     ffmpeg_next::init().unwrap();
 
-    // ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
 
     let args = Args::parse();
+
+    if args.verbose {
+        ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
+    }
 
     let conn = Connection::connect_to_env().unwrap();
 
