@@ -69,7 +69,7 @@ struct Args {
     #[clap(long, short)]
     verbose: bool,
 
-    #[clap(long, default_value = "/dev/dri/card0")]
+    #[clap(long, default_value = "/dev/dri/renderD128")]
     dri_device: String,
 }
 
