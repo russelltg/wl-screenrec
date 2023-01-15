@@ -535,7 +535,7 @@ impl State {
         &mut self,
         name: u32,
         qhandle: &QueueHandle<State>,
-        f: impl FnOnce(&mut PartialOutputInfo) -> (),
+        f: impl FnOnce(&mut PartialOutputInfo),
     ) {
         let output = self.partial_outputs.get_mut(&name).unwrap();
         f(output);
