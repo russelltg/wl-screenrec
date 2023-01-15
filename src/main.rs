@@ -71,6 +71,17 @@ struct Args {
 
     #[clap(long, default_value = "/dev/dri/renderD128")]
     dri_device: String,
+
+    #[clap(long, value_enum, default_value_t)]
+    low_power: LowPowerMode,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Default)]
+enum LowPowerMode {
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 #[derive(Error, Debug)]
@@ -565,16 +576,13 @@ impl State {
 
         self.wl_output = Some(output.output.clone());
         self.enc = Some(EncState::new(
-            &self.args.filename,
-            self.args.hw,
+            &self.args,
             output.size.0,
             output.size.1,
             x,
             y,
             w,
             h,
-            self.args.verbose,
-            &self.args.dri_device,
         ));
         self.queue_copy(qhandle);
     }
@@ -591,20 +599,54 @@ struct EncState {
     capture_size: (i32, i32),
 }
 
+fn make_video_params(
+    args: &Args,
+    encode_w: i32,
+    encode_h: i32,
+    hw_device_ctx: &AvHwDevCtx,
+    frames_yuv: &AvHwFrameCtx,
+) -> encoder::video::Video {
+    let codec =
+        ffmpeg_next::encoder::find_by_name(if args.hw { "h264_vaapi" } else { "libx264" }).unwrap();
+
+    let mut enc =
+        unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
+            .encoder()
+            .video()
+            .unwrap();
+    enc.set_bit_rate(40_000_000);
+    enc.set_width(encode_w as u32);
+    enc.set_height(encode_h as u32);
+    enc.set_time_base((1, 120));
+    enc.set_frame_rate(Some((120, 1)));
+    enc.set_flags(codec::Flags::GLOBAL_HEADER);
+
+    if args.hw {
+        enc.set_format(Pixel::VAAPI);
+
+        unsafe {
+            (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
+            (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+            (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+        }
+    } else {
+        enc.set_format(Pixel::NV12);
+    }
+
+    enc
+}
+
 impl EncState {
     fn new(
-        output: &str,
-        hw: bool,
+        args: &Args,
         capture_w: i32,
         capture_h: i32,
         encode_x: i32,
         encode_y: i32,
         encode_w: i32,
         encode_h: i32,
-        verbose: bool,
-        dri_device: &str,
     ) -> Self {
-        let mut octx = ffmpeg_next::format::output(&output).unwrap();
+        let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
         let mut ost = octx
             .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
@@ -614,23 +656,14 @@ impl EncState {
 
         let vid_stream_idx = ost.index();
 
-        let codec =
-            ffmpeg_next::encoder::find_by_name(if hw { "h264_vaapi" } else { "libx264" }).unwrap();
-
-        let mut enc =
-            unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
-                .encoder()
-                .video()
-                .unwrap();
-
-        let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
+        let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
         let frames_rgb = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
             .unwrap();
 
         let (filter, filter_timebase) = filter(
             &frames_rgb,
-            hw,
+            args.hw,
             capture_w,
             capture_h,
             encode_x,
@@ -643,48 +676,45 @@ impl EncState {
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, encode_w, encode_h)
             .unwrap();
 
-        enc.set_bit_rate(40_000_000);
-        enc.set_width(encode_w as u32);
-        enc.set_height(encode_h as u32);
-        enc.set_time_base((1, 120));
-        enc.set_frame_rate(Some((120, 1)));
-        enc.set_flags(codec::Flags::GLOBAL_HEADER);
-
-        if hw {
-            enc.set_format(Pixel::VAAPI);
-
-            unsafe {
-                (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-                (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
-                (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
-            }
-        } else {
-            enc.set_format(Pixel::NV12);
-        }
-
-        if verbose {
+        if args.verbose {
             println!("{}", filter.dump());
         }
 
+        let enc = make_video_params(args, encode_w, encode_h, &hw_device_ctx, &frames_yuv);
         ost.set_parameters(&enc);
 
         let octx_time_base = ost.time_base();
 
-        let opts = if hw {
-            dict! {
-                // "profile" => "high",
+        let enc = if args.hw {
+            let low_power_opts = dict! {
                 "low_power" => "1"
+            };
+            let regular_opts = dict! {
+                "level" => "30"
+            };
+
+            match args.low_power {
+                LowPowerMode::Auto => match enc.open_with(low_power_opts) {
+                    Ok(enc) => enc,
+                    Err(e) => {
+                        println!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder", e);
+                        make_video_params(args, encode_w, encode_h, &hw_device_ctx, &frames_yuv)
+                            .open_with(regular_opts)
+                            .unwrap()
+                    }
+                },
+                LowPowerMode::On => enc.open_with(low_power_opts).unwrap(),
+                LowPowerMode::Off => enc.open_with(regular_opts).unwrap(),
             }
         } else {
-            dict! {
+            enc.open_with(dict! {
                 "preset" => "ultrafast"
-            }
+            })
+            .unwrap()
         };
 
-        let enc = enc.open_with(opts).unwrap();
-
-        if verbose {
-            ffmpeg_next::format::context::output::dump(&octx, 0, Some(output));
+        if args.verbose {
+            ffmpeg_next::format::context::output::dump(&octx, 0, Some(&args.filename));
         }
 
         octx.write_header().unwrap();
