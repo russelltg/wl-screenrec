@@ -5,8 +5,12 @@ use std::{
     ffi::{c_int, CString},
     num::ParseIntError,
     ptr::null_mut,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    thread::{sleep, spawn},
+    time::Duration,
 };
 
 use clap::{command, ArgAction, Parser};
@@ -127,25 +131,33 @@ fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
 }
 
 struct FpsCounter {
-    last_print_time: Instant,
-    ct: u64,
+    ct: Arc<AtomicU64>,
 }
 
 impl FpsCounter {
     fn new() -> Self {
-        Self {
-            last_print_time: Instant::now(),
-            ct: 0,
-        }
+        let ct = Arc::new(AtomicU64::new(0));
+        let ct_weak = Arc::<AtomicU64>::downgrade(&ct);
+
+        spawn(move || {
+            let mut last_ct = 0;
+            loop {
+                sleep(Duration::from_millis(1000));
+
+                if let Some(ct_ptr) = ct_weak.upgrade() {
+                    let ct = ct_ptr.load(Ordering::SeqCst);
+                    println!("{} fps", ct - last_ct);
+                    last_ct = ct;
+                } else {
+                    return;
+                }
+            }
+        });
+
+        Self { ct }
     }
     fn on_frame(&mut self) {
-        self.ct += 1;
-
-        if self.last_print_time.elapsed() > Duration::from_secs(1) {
-            println!("{} fps", self.ct);
-            self.last_print_time = Instant::now();
-            self.ct = 0;
-        }
+        self.ct.fetch_add(1, Ordering::SeqCst);
     }
 }
 
