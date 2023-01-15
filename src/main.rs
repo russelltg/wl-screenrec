@@ -28,7 +28,11 @@ use ffmpeg::{
 use thiserror::Error;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_buffer::WlBuffer, wl_output::WlOutput, wl_registry::WlRegistry},
+    protocol::{
+        wl_buffer::WlBuffer,
+        wl_output::{self, WlOutput},
+        wl_registry::WlRegistry,
+    },
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::{
@@ -168,15 +172,19 @@ struct PartialOutputInfo {
     name: Option<String>,
     loc: Option<(i32, i32)>,
     size: Option<(i32, i32)>,
+    refresh: Option<Rational>,
     output: WlOutput,
 }
 impl PartialOutputInfo {
     fn complete(&self) -> Option<OutputInfo> {
-        if let (Some(name), Some(loc), Some(size)) = (&self.name, &self.loc, &self.size) {
+        if let (Some(name), Some(loc), Some(size), Some(refresh)) =
+            (&self.name, &self.loc, &self.size, &self.refresh)
+        {
             Some(OutputInfo {
                 loc: *loc,
                 name: name.clone(),
                 size: *size,
+                refresh: *refresh,
                 output: self.output.clone(),
             })
         } else {
@@ -189,6 +197,7 @@ struct OutputInfo {
     name: String,
     loc: (i32, i32),
     size: (i32, i32),
+    refresh: Rational,
     output: WlOutput,
 }
 
@@ -205,7 +214,6 @@ struct State {
     wl_output: Option<WlOutput>,
     enc: Option<EncState>,
     starting_timestamp: Option<i64>,
-    last_pts: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
     partial_outputs: BTreeMap<u32, PartialOutputInfo>,
@@ -270,19 +278,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     state.starting_timestamp = Some(pts_abs);
                 }
                 let pts = pts_abs - state.starting_timestamp.unwrap();
-
-                if let Some(last) = state.last_pts {
-                    if last >= pts {
-                        println!(
-                            "non-monotonic timestamps detected ({} -> {}), discarding frame",
-                            last, pts
-                        );
-                        return;
-                    }
-                }
-
                 surf.set_pts(Some(pts));
-                state.last_pts = Some(pts);
 
                 unsafe {
                     (*surf.as_mut_ptr()).time_base.num = 1;
@@ -358,13 +354,24 @@ impl Dispatch<WlRegistry, ()> for State {
 
 impl Dispatch<WlOutput, u32> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &WlOutput,
-        _event: <WlOutput as Proxy>::Event,
-        _data: &u32,
+        event: <WlOutput as Proxy>::Event,
+        data: &u32,
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
+        match event {
+            wl_output::Event::Mode { refresh, .. } => {
+                let output = state.partial_outputs.get_mut(data).unwrap();
+                output.refresh = Some(Rational(refresh, 1000));
+                if let Some(info) = output.complete() {
+                    state.outputs.insert(*data, info);
+                }
+                state.start_if_output_probe_complete(qhandle);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -466,6 +473,7 @@ impl State {
                         name: None,
                         loc: None,
                         size: None,
+                        refresh: None,
                         output,
                     },
                 );
@@ -479,7 +487,6 @@ impl State {
                 screencopy_manager: man,
                 enc: None,
                 starting_timestamp: None,
-                last_pts: None,
                 fps_counter: FpsCounter::new(),
                 args,
                 wl_output: None,
@@ -592,6 +599,7 @@ impl State {
         self.wl_output = Some(output.output.clone());
         self.enc = Some(EncState::new(
             &self.args,
+            output.refresh,
             output.size.0,
             output.size.1,
             x,
@@ -618,6 +626,7 @@ fn make_video_params(
     args: &Args,
     encode_w: i32,
     encode_h: i32,
+    framerate: Rational,
     hw_device_ctx: &AvHwDevCtx,
     frames_yuv: &AvHwFrameCtx,
 ) -> encoder::video::Video {
@@ -632,8 +641,8 @@ fn make_video_params(
     enc.set_bit_rate(40_000_000);
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
-    enc.set_time_base((1, 120));
-    enc.set_frame_rate(Some((120, 1)));
+    enc.set_time_base(framerate.invert());
+    enc.set_frame_rate(Some(framerate));
     enc.set_flags(codec::Flags::GLOBAL_HEADER);
 
     if args.hw {
@@ -654,6 +663,7 @@ fn make_video_params(
 impl EncState {
     fn new(
         args: &Args,
+        refresh: Rational,
         capture_w: i32,
         capture_h: i32,
         encode_x: i32,
@@ -667,7 +677,7 @@ impl EncState {
             .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
             .unwrap();
 
-        ost.set_time_base((1, 120));
+        ost.set_time_base(refresh.invert());
 
         let vid_stream_idx = ost.index();
 
@@ -695,7 +705,14 @@ impl EncState {
             println!("{}", filter.dump());
         }
 
-        let enc = make_video_params(args, encode_w, encode_h, &hw_device_ctx, &frames_yuv);
+        let enc = make_video_params(
+            args,
+            encode_w,
+            encode_h,
+            refresh,
+            &hw_device_ctx,
+            &frames_yuv,
+        );
         ost.set_parameters(&enc);
 
         let octx_time_base = ost.time_base();
@@ -713,9 +730,16 @@ impl EncState {
                     Ok(enc) => enc,
                     Err(e) => {
                         println!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder", e);
-                        make_video_params(args, encode_w, encode_h, &hw_device_ctx, &frames_yuv)
-                            .open_with(regular_opts)
-                            .unwrap()
+                        make_video_params(
+                            args,
+                            encode_w,
+                            encode_h,
+                            refresh,
+                            &hw_device_ctx,
+                            &frames_yuv,
+                        )
+                        .open_with(regular_opts)
+                        .unwrap()
                     }
                 },
                 LowPowerMode::On => enc.open_with(low_power_opts).unwrap(),
@@ -769,7 +793,7 @@ impl EncState {
         let mut encoded = Packet::empty();
         while self.enc.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
-            encoded.write_interleaved(&mut self.octx).unwrap();
+            let _ = encoded.write_interleaved(&mut self.octx);
         }
     }
 
