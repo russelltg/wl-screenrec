@@ -84,7 +84,7 @@ struct Args {
     #[clap(long, value_enum, default_value_t)]
     low_power: LowPowerMode,
 
-    #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at")]
+    #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps")]
     bitrate: Size,
 }
 
