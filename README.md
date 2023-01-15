@@ -31,7 +31,9 @@ but still not a huge change.
 
 ```bash
 paru -S wl-screenrec-git
-# OR
+```
+Or, manually:
+```
 git clone https://aur.archlinux.org/wl-screenrec-git.git
 cd wl-screenrec-git
 makepkg -si
