@@ -29,6 +29,7 @@ use ffmpeg::{
     frame::{self, video},
     Error, Packet, Rational,
 };
+use human_size::{Byte, Megabyte, Size, SpecificSize};
 use thiserror::Error;
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
@@ -77,11 +78,14 @@ struct Args {
     #[clap(long, short)]
     verbose: bool,
 
-    #[clap(long, default_value = "/dev/dri/renderD128")]
+    #[clap(long, default_value="/dev/dri/renderD128")]
     dri_device: String,
 
     #[clap(long, value_enum, default_value_t)]
     low_power: LowPowerMode,
+
+    #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at")]
+    bitrate: Size,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -646,7 +650,7 @@ fn make_video_params(
             .encoder()
             .video()
             .unwrap();
-    enc.set_bit_rate(40_000_000);
+    enc.set_bit_rate(args.bitrate.into::<Byte>().value() as usize * 8);
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
     enc.set_time_base(framerate.invert());

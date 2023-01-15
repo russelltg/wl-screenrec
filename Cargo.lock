@@ -201,6 +201,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "human-size"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62eef4964b4e1c2d66981a5646d893768fd15d96957aae5e0e85c632503e9724"
+
+[[package]]
 name = "io-lifetimes"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -687,6 +693,7 @@ dependencies = [
  "ctrlc",
  "drm-fourcc",
  "ffmpeg-next",
+ "human-size",
  "thiserror",
  "wayland-client",
  "wayland-protocols",

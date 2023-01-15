@@ -14,4 +14,5 @@ ffmpeg-next = "5.1.1"
 ctrlc = "3.2.4"
 thiserror = "1.0.38"
 drm-fourcc = "2.2.0"
+human-size = "0.4.2"
 
