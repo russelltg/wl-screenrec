@@ -78,7 +78,7 @@ struct Args {
     #[clap(long, short)]
     verbose: bool,
 
-    #[clap(long, default_value="/dev/dri/renderD128")]
+    #[clap(long, default_value = "/dev/dri/renderD128")]
     dri_device: String,
 
     #[clap(long, value_enum, default_value_t)]
@@ -632,6 +632,8 @@ struct EncState {
     octx_time_base: Rational,
     vid_stream_idx: usize,
     capture_size: (i32, i32),
+    last_pts: i64,
+    verbose: bool,
 }
 
 fn make_video_params(
@@ -778,6 +780,8 @@ impl EncState {
             vid_stream_idx,
             frames_rgb,
             capture_size: (capture_w, capture_h),
+            last_pts: 0,
+            verbose: args.verbose,
         }
     }
     fn process_ready(&mut self) {
@@ -791,11 +795,21 @@ impl EncState {
             .is_ok()
         {
             unsafe {
-                let new_pts = av_rescale_q(
+                let mut new_pts = av_rescale_q(
                     yuv_frame.pts().unwrap(),
                     self.filter_output_timebase.into(),
                     self.octx_time_base.into(),
                 );
+
+                // this is kind of a nasty hack. because the timebase of the encoder is integer multiples of the refresh rate, sometimes we end up with duplicate PTS's.
+                // the real solution to this would be a higher frequency time base, but that seems to break timing. ffmpeg timing is confusing
+                if new_pts <= self.last_pts {
+                    if self.verbose {
+                        println!("nudging pts {} -> {}", new_pts, new_pts + 1);
+                    }
+                    new_pts += 1;
+                }
+                self.last_pts = new_pts;
                 yuv_frame.set_pts(Some(new_pts));
             }
 
