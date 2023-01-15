@@ -20,6 +20,8 @@ if there are issues or if you've tested in on AMD/Nvidia and you want to update 
 | `wf-recorder --codec h264_vaapi --device  /dev/dri/card0` | ~75%                                    |
 | `wl-screenrec`                                            | ~2.5%                                   |
 
+Additionally, with either `wf-recorder` setup there is visible stuttering in the `vkcube` window. `wl-screenrec` does not seem to stutter at all.
+
 # Installation
 
 ## From source using cargo
