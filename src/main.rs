@@ -363,12 +363,9 @@ impl Dispatch<WlOutput, u32> for State {
     ) {
         match event {
             wl_output::Event::Mode { refresh, .. } => {
-                let output = state.partial_outputs.get_mut(data).unwrap();
-                output.refresh = Some(Rational(refresh, 1000));
-                if let Some(info) = output.complete() {
-                    state.outputs.insert(*data, info);
-                }
-                state.start_if_output_probe_complete(qhandle);
+                state.update_output_info(*data, qhandle, |info| {
+                    info.refresh = Some(Rational(refresh, 1000))
+                });
             }
             _ => {}
         }
@@ -398,28 +395,13 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
     ) {
         match event {
             zxdg_output_v1::Event::Name { name } => {
-                let output = state.partial_outputs.get_mut(data).unwrap();
-                output.name = Some(name);
-                if let Some(info) = output.complete() {
-                    state.outputs.insert(*data, info);
-                }
-                state.start_if_output_probe_complete(qhandle);
+                state.update_output_info(*data, qhandle, |info| info.name = Some(name));
             }
             zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                let output = state.partial_outputs.get_mut(data).unwrap();
-                output.loc = Some((x, y));
-                if let Some(info) = output.complete() {
-                    state.outputs.insert(*data, info);
-                }
-                state.start_if_output_probe_complete(qhandle);
+                state.update_output_info(*data, qhandle, |info| info.loc = Some((x, y)));
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
-                let output = state.partial_outputs.get_mut(data).unwrap();
-                output.size = Some((width, height));
-                if let Some(info) = output.complete() {
-                    state.outputs.insert(*data, info);
-                }
-                state.start_if_output_probe_complete(qhandle);
+                state.update_output_info(*data, qhandle, |info| info.size = Some((width, height)));
             }
             _ => {}
         }
@@ -535,6 +517,20 @@ impl State {
 
         self.surfaces_owned_by_compositor
             .push_back((surf, mapping, dma_params, capture, buf));
+    }
+
+    fn update_output_info(
+        &mut self,
+        name: u32,
+        qhandle: &QueueHandle<State>,
+        f: impl FnOnce(&mut PartialOutputInfo) -> (),
+    ) {
+        let output = self.partial_outputs.get_mut(&name).unwrap();
+        f(output);
+        if let Some(info) = output.complete() {
+            self.outputs.insert(name, info);
+        }
+        self.start_if_output_probe_complete(qhandle);
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
@@ -851,7 +847,6 @@ impl AvHwDevCtx {
 
             // ffmpeg does not expose RGB vaapi
             (*hwframe_casted).format = Pixel::VAAPI.into();
-            // (*hwframe_casted).sw_format = AVPixelFormat::AV_PIX_FMT_YUV420P;
             (*hwframe_casted).sw_format = pixfmt;
             (*hwframe_casted).width = width;
             (*hwframe_casted).height = height;
@@ -864,7 +859,6 @@ impl AvHwDevCtx {
 
             let ret = Ok(AvHwFrameCtx {
                 ptr: av_buffer_ref(hwframe),
-                // _devctx: self.clone(),
             });
 
             av_buffer_unref(&mut hwframe);
