@@ -27,6 +27,16 @@ but still not a huge change.
 
 # Installation
 
+## From the AUR
+
+```bash
+paru -S wl-screenrec-git
+# OR
+git clone https://aur.archlinux.org/wl-screenrec-git.git
+cd wl-screenrec-git
+makepkg -si
+```
+
 ## From source using cargo
 
 Install ffmpeg, which is a required dependency.
