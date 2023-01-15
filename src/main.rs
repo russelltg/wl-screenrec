@@ -205,6 +205,7 @@ struct State {
     wl_output: Option<WlOutput>,
     enc: Option<EncState>,
     starting_timestamp: Option<i64>,
+    last_pts: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
     partial_outputs: BTreeMap<u32, PartialOutputInfo>,
@@ -263,13 +264,26 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 destroy_buffer.destroy();
 
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
-                let pts = secs * 1_000_000_000 + i64::from(tv_nsec);
+                let pts_abs = secs * 1_000_000_000 + i64::from(tv_nsec);
 
                 if state.starting_timestamp.is_none() {
-                    state.starting_timestamp = Some(pts);
+                    state.starting_timestamp = Some(pts_abs);
+                }
+                let pts = pts_abs - state.starting_timestamp.unwrap();
+
+                if let Some(last) = state.last_pts {
+                    if last >= pts {
+                        println!(
+                            "non-monotonic timestamps detected ({} -> {}), discarding frame",
+                            last, pts
+                        );
+                        return;
+                    }
                 }
 
-                surf.set_pts(Some(pts - state.starting_timestamp.unwrap()));
+                surf.set_pts(Some(pts));
+                state.last_pts = Some(pts);
+
                 unsafe {
                     (*surf.as_mut_ptr()).time_base.num = 1;
                     (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
@@ -465,6 +479,7 @@ impl State {
                 screencopy_manager: man,
                 enc: None,
                 starting_timestamp: None,
+                last_pts: None,
                 fps_counter: FpsCounter::new(),
                 args,
                 wl_output: None,
