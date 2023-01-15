@@ -14,11 +14,11 @@ if there are issues or if you've tested in on AMD/Nvidia and you want to update 
 - i9-11900H CPU/GPU
 - `vkcube` running on screen, as both `wf-recorder` and `wl-screenrec` don't copy/encode frames when there is no difference
 
-| command                                                   | steady state CPU usage by recording app |
-| --------------------------------------------------------- | --------------------------------------- |
-| `wf-recorder`                                             | ~500%                                   |
-| `wf-recorder --codec h264_vaapi --device  /dev/dri/card0` | ~75%                                    |
-| `wl-screenrec`                                            | ~2.5%                                   |
+| command                                       | steady state CPU usage by recording app |
+| --------------------------------------------- | --------------------------------------- |
+| `wf-recorder`                                 | ~500%                                   |
+| `wf-recorder -c h264_vaapi -d /dev/dri/card0` | ~75%                                    |
+| `wl-screenrec`                                | ~2.5%                                   |
 
 Additionally, with either `wf-recorder` setup there is visible stuttering in the `vkcube` window. `wl-screenrec` does not seem to stutter at all.
 
