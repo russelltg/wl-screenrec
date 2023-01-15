@@ -625,8 +625,8 @@ fn make_video_params(
         enc.set_format(Pixel::VAAPI);
 
         unsafe {
-            (*enc.as_mut_ptr()).hw_device_ctx = hw_device_ctx.ptr as *mut _;
-            (*enc.as_mut_ptr()).hw_frames_ctx = frames_yuv.ptr as *mut _;
+            (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.ptr as *mut _);
+            (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.ptr as *mut _);
             (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
         }
     } else {
@@ -838,8 +838,7 @@ impl AvHwDevCtx {
 impl Drop for AvHwDevCtx {
     fn drop(&mut self) {
         unsafe {
-            // TODO: debug: segfault when I add this
-            // av_buffer_unref(&mut self.ptr);
+            av_buffer_unref(&mut self.ptr);
         }
     }
 }
@@ -851,8 +850,7 @@ struct AvHwFrameCtx {
 impl Drop for AvHwFrameCtx {
     fn drop(&mut self) {
         unsafe {
-            // TODO: debug: segfault when I uncomment
-            // av_buffer_unref(&mut self.ptr);
+            av_buffer_unref(&mut self.ptr);
         }
     }
 }
@@ -941,7 +939,6 @@ fn main() {
     ctrlc::set_handler(move || RUNNING.store(false, Ordering::SeqCst)).unwrap();
 
     ffmpeg_next::init().unwrap();
-
 
     let args = Args::parse();
 
