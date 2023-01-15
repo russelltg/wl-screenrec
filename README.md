@@ -7,6 +7,18 @@ as performant as you could hope.
 Tested with Intel GPUs, but it's possible it works on other GPUs too, so long they support vaapi. Open a PR
 if there are issues or if you've tested in on AMD/Nvidia and you want to update this documentation!
 
+# Performance
+
+(relatively unscientific) benchmark setup:
+- 4kp60 display
+- i9-11900H CPU/GPU
+- `vkcube` running on screen, as both `wf-recorder` and `wl-screenrec` don't copy/encode frames when there is no difference
+
+| command                                                   | steady state CPU usage by recording app |
+| --------------------------------------------------------- | --------------------------------------- |
+| `wf-recorder`                                             | ~500%                                   |
+| `wf-recorder --codec h264_vaapi --device  /dev/dri/card0` | ~75%                                    |
+| `wl-screenrec`                                            | ~2.5%                                   |
 
 # Installation
 
