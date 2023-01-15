@@ -5,7 +5,7 @@ and uses the GPU to do both the pixel format conversion and the encoding, making
 as performant as you could hope. 
 
 Tested with Intel GPUs, but it's possible it works on other GPUs too, so long they support vaapi. Open a PR
-if there are issues or if you've tested in on AMD/Nvidia and you want to update this documentation!
+or issue if there are problems or if you've tested in on AMD/Nvidia and you want to update this documentation!
 
 # Performance
 
