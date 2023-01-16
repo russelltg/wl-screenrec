@@ -249,7 +249,6 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        todo!()
     }
 }
 
@@ -262,7 +261,6 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for State {
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        todo!()
     }
 }
 
