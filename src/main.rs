@@ -57,10 +57,15 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse)]
+    #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse, help="don't use the GPU encoder, download the frames onto the CPU and use x264")]
     hw: bool,
 
-    #[clap(long, short, default_value = "screenrecord.avi")]
+    #[clap(
+        long,
+        short,
+        default_value = "screenrecord.avi",
+        help = "filename to write to. container type is detected from extension"
+    )]
     filename: String,
 
     #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output")]
@@ -74,7 +79,7 @@ struct Args {
     )]
     output: String,
 
-    #[clap(long, short)]
+    #[clap(long, short, help="")]
     verbose: bool,
 
     #[clap(long, default_value = "/dev/dri/renderD128")]
