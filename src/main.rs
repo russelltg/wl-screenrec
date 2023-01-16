@@ -632,8 +632,6 @@ struct EncState {
     octx_time_base: Rational,
     vid_stream_idx: usize,
     capture_size: (i32, i32),
-    last_pts: i64,
-    verbose: bool,
 }
 
 fn make_video_params(
@@ -641,6 +639,7 @@ fn make_video_params(
     encode_w: i32,
     encode_h: i32,
     framerate: Rational,
+    global_header: bool,
     hw_device_ctx: &AvHwDevCtx,
     frames_yuv: &AvHwFrameCtx,
 ) -> encoder::video::Video {
@@ -652,12 +651,16 @@ fn make_video_params(
             .encoder()
             .video()
             .unwrap();
+
     enc.set_bit_rate(args.bitrate.into::<Byte>().value() as usize * 8);
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
-    enc.set_time_base(framerate.invert());
+    enc.set_time_base(Rational(1, 1_000_000_000));
     enc.set_frame_rate(Some(framerate));
-    enc.set_flags(codec::Flags::GLOBAL_HEADER);
+
+    if global_header {
+        enc.set_flags(codec::Flags::GLOBAL_HEADER);
+    }
 
     if args.hw {
         enc.set_format(Pixel::VAAPI);
@@ -687,11 +690,11 @@ impl EncState {
     ) -> Self {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
+        let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
+
         let mut ost = octx
             .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
             .unwrap();
-
-        ost.set_time_base(refresh.invert());
 
         let vid_stream_idx = ost.index();
 
@@ -724,12 +727,12 @@ impl EncState {
             encode_w,
             encode_h,
             refresh,
+            global_header,
             &hw_device_ctx,
             &frames_yuv,
         );
         ost.set_parameters(&enc);
 
-        let octx_time_base = ost.time_base();
 
         let enc = if args.hw {
             let low_power_opts = dict! {
@@ -749,6 +752,7 @@ impl EncState {
                             encode_w,
                             encode_h,
                             refresh,
+                            global_header,
                             &hw_device_ctx,
                             &frames_yuv,
                         )
@@ -771,6 +775,8 @@ impl EncState {
         }
 
         octx.write_header().unwrap();
+        let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
+
         EncState {
             filter,
             enc,
@@ -780,8 +786,6 @@ impl EncState {
             vid_stream_idx,
             frames_rgb,
             capture_size: (capture_w, capture_h),
-            last_pts: 0,
-            verbose: args.verbose,
         }
     }
     fn process_ready(&mut self) {
@@ -794,31 +798,15 @@ impl EncState {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-            unsafe {
-                let mut new_pts = av_rescale_q(
-                    yuv_frame.pts().unwrap(),
-                    self.filter_output_timebase.into(),
-                    self.octx_time_base.into(),
-                );
 
-                // this is kind of a nasty hack. because the timebase of the encoder is integer multiples of the refresh rate, sometimes we end up with duplicate PTS's.
-                // the real solution to this would be a higher frequency time base, but that seems to break timing. ffmpeg timing is confusing
-                if new_pts <= self.last_pts {
-                    if self.verbose {
-                        println!("nudging pts {} -> {}", new_pts, new_pts + 1);
-                    }
-                    new_pts += 1;
-                }
-                self.last_pts = new_pts;
-                yuv_frame.set_pts(Some(new_pts));
-            }
-
+            // encoder has same time base as the filter, so don't do any time scaling
             self.enc.send_frame(&yuv_frame).unwrap();
         }
 
         let mut encoded = Packet::empty();
         while self.enc.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
+            encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
             let _ = encoded.write_interleaved(&mut self.octx);
         }
     }
@@ -980,14 +968,14 @@ fn filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={}:{}:{}:{},scale_vaapi=format=nv12{}:w={}:h={}",
+            "crop={}:{}:{}:{},scale_vaapi=format=nv12:w={}:h={}{}",
             enc_width,
             enc_height,
             enc_x,
             enc_y,
-            if hw { "" } else { ", hwdownload" },
             enc_width,
-            enc_height
+            enc_height,
+            if hw { "" } else { ", hwdownload" },
         ))
         .unwrap();
 
