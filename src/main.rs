@@ -79,7 +79,7 @@ struct Args {
     )]
     output: String,
 
-    #[clap(long, short, help="")]
+    #[clap(long, short, help = "add very loud logging")]
     verbose: bool,
 
     #[clap(long, default_value = "/dev/dri/renderD128")]
@@ -696,12 +696,6 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let mut ost = octx
-            .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
-            .unwrap();
-
-        let vid_stream_idx = ost.index();
-
         let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
         let frames_rgb = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
@@ -735,7 +729,6 @@ impl EncState {
             &hw_device_ctx,
             &frames_yuv,
         );
-        ost.set_parameters(&enc);
 
         let enc = if args.hw {
             let low_power_opts = dict! {
@@ -773,12 +766,18 @@ impl EncState {
             .unwrap()
         };
 
+        let mut ost = octx
+            .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
+            .unwrap();
+
+        let vid_stream_idx = ost.index();
+        ost.set_parameters(&enc);
+        octx.write_header().unwrap();
+        let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
+
         if args.verbose {
             ffmpeg_next::format::context::output::dump(&octx, 0, Some(&args.filename));
         }
-
-        octx.write_header().unwrap();
-        let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
 
         EncState {
             filter,
