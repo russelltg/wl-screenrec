@@ -4,8 +4,11 @@ High performance wlroots based screen recorder. Uses dma-buf transfers to get su
 and uses the GPU to do both the pixel format conversion and the encoding, making it about
 as performant as you could hope. 
 
-Tested with Intel GPUs, but it's possible it works on other GPUs too, so long they support vaapi. Open a PR
-or issue if there are problems or if you've tested in on AMD/Nvidia and you want to update this documentation!
+Should work well on Intel and AMD GPUs. It also might work on desktop Nvidia GPUs with `libva-vdpau-driver`, 
+but it seems like vaapi doesn't work on laptop Nvidia GPUs. However, many of these systems have Intel GPUs as well,
+which work great.
+
+Open an issue if something is not working, I'm happy to take a look.
 
 # Performance
 
