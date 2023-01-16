@@ -20,9 +20,8 @@ use ffmpeg::{
     ffi::{
         av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init,
-        av_hwframe_get_buffer, av_hwframe_map, av_rescale_q, avcodec_alloc_context3,
-        AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ,
-        AV_HWFRAME_MAP_WRITE,
+        av_hwframe_get_buffer, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor,
+        AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Pixel},
@@ -733,7 +732,6 @@ impl EncState {
         );
         ost.set_parameters(&enc);
 
-
         let enc = if args.hw {
             let low_power_opts = dict! {
                 "low_power" => "1"
@@ -798,7 +796,6 @@ impl EncState {
             .frame(&mut yuv_frame)
             .is_ok()
         {
-
             // encoder has same time base as the filter, so don't do any time scaling
             self.enc.send_frame(&yuv_frame).unwrap();
         }
