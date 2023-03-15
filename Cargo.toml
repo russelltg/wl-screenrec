@@ -10,7 +10,7 @@ clap = { version = "4", features = ["derive"] }
 wayland-client = "0.30"
 wayland-protocols = { version = "0.30", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.1", features = ["client"] }
-ffmpeg-next = "5.1.1"
+ffmpeg-next = "6.0.0"
 ctrlc = "3.2.4"
 thiserror = "1.0.38"
 drm-fourcc = "2.2.0"
