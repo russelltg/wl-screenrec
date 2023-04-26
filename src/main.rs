@@ -7,6 +7,7 @@ use std::{
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{channel, Receiver},
         Arc,
     },
     thread::{sleep, spawn},
@@ -17,15 +18,20 @@ use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec, dict, encoder,
+    codec::{Audio, Context, Id, Parameters},
+    decoder,
+    device::{self, input::audio},
     ffi::{
-        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec,
-        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
+        av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
+        av_find_input_format, av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map, avcodec_alloc_context3,
+        AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ,
+        AV_HWFRAME_MAP_WRITE, avformat_query_codec, FF_COMPLIANCE_STRICT, av_get_pix_fmt_name,
     },
     filter,
-    format::{self, Pixel},
+    format::{self, context::Input, Pixel},
     frame::{self, video},
-    media, Packet, Rational,
+    media, Packet, Rational, Format, Dictionary, ChannelLayout,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGINT, SIGUSR1};
@@ -128,6 +134,9 @@ struct Args {
         value_parser=parse_duration
     )]
     history: Option<Duration>,
+
+    #[clap(long, default_value = "false", action=ArgAction::SetTrue, help="record audio with the stream. Defaults to the default audio capture device")]
+    audio: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -897,9 +906,15 @@ impl State {
     }
 }
 
+struct AudioState {
+    chan: Receiver<Packet>,
+    // enc_audio: encoder::Audio,
+    // audio_input: Input,
+}
+
 struct EncState {
     filter: filter::Graph,
-    enc: encoder::Video,
+    enc_video: encoder::Video,
     octx: format::context::Output,
     frames_rgb: AvHwFrameCtx,
     filter_output_timebase: Rational,
@@ -908,6 +923,8 @@ struct EncState {
     verbose: bool,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
+    capture_size: (i32, i32),
+    audio: Option<AudioState>,
 }
 
 #[derive(Copy, Clone)]
@@ -1099,7 +1116,7 @@ impl EncState {
             &mut frames_yuv,
         )?;
 
-        let enc = if args.hw {
+        let enc_video = if args.hw {
             let low_power_opts = dict! {
                 "low_power" => "1"
             };
@@ -1141,10 +1158,109 @@ impl EncState {
             .unwrap()
         };
 
-        let mut ost = octx.add_stream(codec).unwrap();
+        let mut ost_video = octx.add_stream(codec).unwrap();
 
-        let vid_stream_idx = ost.index();
-        ost.set_parameters(&enc);
+        let vid_stream_idx = ost_video.index();
+        ost_video.set_parameters(&enc_video);
+
+        let audio = if args.audio {
+            let mut audio_codec = ffmpeg::encoder::find(
+                octx.format()
+                    .codec(&args.output, ffmpeg::media::Type::Audio),
+            )
+            .unwrap()
+            .audio()
+            .unwrap();
+
+            let mut ost_audio = octx.add_stream(audio_codec).unwrap();
+
+
+            // device::register_all();
+
+            let alsa_format = unsafe {
+                let fmt = av_find_input_format(b"alsa\0".as_ptr() as _);
+                assert!(!fmt.is_null());
+                format::Input::wrap(fmt as _)
+            };
+
+            let mut audio_input =
+                format::open_with(&"hw:0", &Format::Input(alsa_format), Dictionary::default())
+                    .unwrap()
+                    .input();
+
+            let best_audio_stream = audio_input
+                .streams()
+                .best(ffmpeg::media::Type::Audio)
+                .unwrap();
+
+            let audio_stream_index = best_audio_stream.index();
+            let audio_stream_time_base = best_audio_stream.time_base();
+
+            let mut audio_decoder = Context::from_parameters(best_audio_stream.parameters())
+                .unwrap()
+                .decoder()
+                .audio()
+                .unwrap();
+
+            // ost_audio.set_time_base((1, audio_decoder.rate() as i32));
+
+            let ost_audio_time_base = ost_audio.time_base();
+            let ost_audio_idx = ost_audio.index();
+
+            let channel_layout = audio_codec
+                .channel_layouts()
+                .map(|cls| cls.best(audio_decoder.channel_layout().channels()))
+                .unwrap_or(ChannelLayout::STEREO);
+
+            let mut enc_audio = Context::from_parameters(ost_audio.parameters())
+                .unwrap()
+                .encoder()
+                .audio()
+                .unwrap();
+
+            enc_audio.set_rate(audio_decoder.rate() as i32);
+            enc_audio.set_channel_layout(channel_layout);
+            enc_audio.set_channels(channel_layout.channels());
+            enc_audio.set_format(audio_codec.formats().unwrap().next().unwrap());
+            enc_audio.set_time_base(audio_decoder.time_base());
+
+            let enc_audio = enc_audio.open_as(audio_codec).unwrap();
+
+            ost_audio.set_parameters(&enc_audio);
+
+            let (s, r) = channel();
+            // spawn(move || {
+            //     let mut frame = frame::Audio::empty();
+
+            //     for (stream, mut packet) in audio_input.packets() {
+            //         if stream.index() == audio_stream_index {
+            //             packet.rescale_ts(audio_stream_time_base, audio_decoder.time_base());
+            //             audio_decoder.send_packet(&packet).unwrap();
+
+            //             while audio_decoder.receive_frame(&mut frame).is_ok() {
+            //                 enc_audio.send_frame(&frame).unwrap();
+
+            //                 let mut pack = Packet::empty();
+            //                 while enc_audio.receive_packet(&mut pack).is_ok() {
+            //                     pack.set_stream(ost_audio_idx);
+            //                     pack.rescale_ts(audio_decoder.time_base(), ost_audio_time_base);
+            //                     s.send(pack);
+
+            //                     pack = Packet::empty();
+            //                 }
+            //             }
+            //         }
+            //     }
+            // });
+
+            Some(AudioState {
+                chan: r,
+                // audio_input,
+            })
+
+        } else {None};
+
+
         octx.write_header().unwrap();
         let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
 
@@ -1159,7 +1275,7 @@ impl EncState {
 
         Ok(EncState {
             filter,
-            enc,
+            enc_video,
             filter_output_timebase: filter_timebase,
             octx_time_base,
             octx,
@@ -1168,6 +1284,8 @@ impl EncState {
             verbose: args.verbose,
             history_state,
             sigusr1_flag,
+            capture_size: (capture_w, capture_h),
+            audio,
         })
     }
 
@@ -1202,11 +1320,11 @@ impl EncState {
             .is_ok()
         {
             // encoder has same time base as the filter, so don't do any time scaling
-            self.enc.send_frame(&yuv_frame).unwrap();
+            self.enc_video.send_frame(&yuv_frame).unwrap();
         }
 
         let mut encoded = Packet::empty();
-        while self.enc.receive_packet(&mut encoded).is_ok() {
+        while self.enc_video.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
             encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
 
@@ -1253,12 +1371,18 @@ impl EncState {
 
             encoded = Packet::empty();
         }
+
+        if let Some(AudioState { chan }) = &mut self.audio {
+            while let Ok(pack) = chan.try_recv() {
+                let _ = pack.write_interleaved(&mut self.octx);
+            }
+        }
     }
 
     fn flush(&mut self) {
         self.filter.get("in").unwrap().source().flush().unwrap();
         self.process_ready();
-        self.enc.send_eof().unwrap();
+        self.enc_video.send_eof().unwrap();
         self.process_ready();
         self.octx.write_trailer().unwrap();
     }

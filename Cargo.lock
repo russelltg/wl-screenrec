@@ -219,8 +219,7 @@ dependencies = [
 [[package]]
 name = "ffmpeg-next"
 version = "6.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8af03c47ad26832ab3aabc4cdbf210af3d3b878783edd5a7ba044ba33aab7a60"
+source = "git+https://github.com/russelltg/rust-ffmpeg?branch=fix_freebsd_build#ad56ab755844672aeb42376a02a67c27a9f1e424"
 dependencies = [
  "bitflags 1.3.2",
  "ffmpeg-sys-next",
