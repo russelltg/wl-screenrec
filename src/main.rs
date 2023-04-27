@@ -1,10 +1,12 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use std::{
+    cmp::max,
     collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
     num::ParseIntError,
     str::from_utf8_unchecked,
+    ptr::{null_mut, NonNull},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{channel, Receiver},
@@ -33,6 +35,7 @@ use ffmpeg::{
     frame::{self, video},
     media, Packet, Rational, Format, Dictionary, ChannelLayout,
 };
+use fifo::AudioFifo;
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGINT, SIGUSR1};
 use thiserror::Error;
@@ -70,6 +73,8 @@ use wayland_protocols_wlr::{
 
 mod avhw;
 use avhw::{AvHwDevCtx, AvHwFrameCtx};
+
+mod fifo;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -906,12 +911,6 @@ impl State {
     }
 }
 
-struct AudioState {
-    chan: Receiver<Packet>,
-    // enc_audio: encoder::Audio,
-    // audio_input: Input,
-}
-
 struct EncState {
     filter: filter::Graph,
     enc_video: encoder::Video,
@@ -924,7 +923,11 @@ struct EncState {
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
     capture_size: (i32, i32),
-    audio: Option<AudioState>,
+    audio_receiver: Option<Receiver<Packet>>,
+}
+
+struct AudioState {
+    fifo: Option<AudioFifo>,
 }
 
 #[derive(Copy, Clone)]
@@ -1163,7 +1166,7 @@ impl EncState {
         let vid_stream_idx = ost_video.index();
         ost_video.set_parameters(&enc_video);
 
-        let audio = if args.audio {
+        let audio_receiver = if args.audio {
             let mut audio_codec = ffmpeg::encoder::find(
                 octx.format()
                     .codec(&args.output, ffmpeg::media::Type::Audio),
@@ -1173,7 +1176,6 @@ impl EncState {
             .unwrap();
 
             let mut ost_audio = octx.add_stream(audio_codec).unwrap();
-
 
             // device::register_all();
 
@@ -1221,45 +1223,76 @@ impl EncState {
             enc_audio.set_rate(audio_decoder.rate() as i32);
             enc_audio.set_channel_layout(channel_layout);
             enc_audio.set_channels(channel_layout.channels());
-            enc_audio.set_format(audio_codec.formats().unwrap().next().unwrap());
+            let format = audio_codec.formats().unwrap().next().unwrap();
+            enc_audio.set_format(format);
             enc_audio.set_time_base(audio_decoder.time_base());
 
-            let enc_audio = enc_audio.open_as(audio_codec).unwrap();
+            let mut enc_audio = enc_audio.open_as(audio_codec).unwrap();
 
             ost_audio.set_parameters(&enc_audio);
 
+            let mut audiostate = AudioState { fifo: None };
+
+            if let Some(codec) = enc_audio.codec() {
+                if !codec
+                    .capabilities()
+                    .contains(ffmpeg::codec::capabilities::Capabilities::VARIABLE_FRAME_SIZE)
+                {
+                    audiostate.fifo = Some(
+                        AudioFifo::new(
+                            format,
+                            channel_layout.channels(),
+                            max(enc_audio.frame_size(), audio_decoder.frame_size()) * 2,
+                        )
+                        .unwrap(),
+                    );
+                }
+            }
+
             let (s, r) = channel();
-            // spawn(move || {
-            //     let mut frame = frame::Audio::empty();
+            spawn(move || {
+                let mut frame = frame::Audio::empty();
+                let mut frame_into_encoder =
+                    frame::Audio::new(format, enc_audio.frame_size() as usize, channel_layout);
 
-            //     for (stream, mut packet) in audio_input.packets() {
-            //         if stream.index() == audio_stream_index {
-            //             packet.rescale_ts(audio_stream_time_base, audio_decoder.time_base());
-            //             audio_decoder.send_packet(&packet).unwrap();
+                let mut pts = 0;
 
-            //             while audio_decoder.receive_frame(&mut frame).is_ok() {
-            //                 enc_audio.send_frame(&frame).unwrap();
+                for (stream, mut packet) in audio_input.packets() {
+                    if stream.index() == audio_stream_index {
+                        packet.rescale_ts(audio_stream_time_base, audio_decoder.time_base());
+                        audio_decoder.send_packet(&packet).unwrap();
 
-            //                 let mut pack = Packet::empty();
-            //                 while enc_audio.receive_packet(&mut pack).is_ok() {
-            //                     pack.set_stream(ost_audio_idx);
-            //                     pack.rescale_ts(audio_decoder.time_base(), ost_audio_time_base);
-            //                     s.send(pack);
+                        while audio_decoder.receive_frame(&mut frame).is_ok() {
+                            if let Some(fifo) = &mut audiostate.fifo {
+                                fifo.push(&frame);
+                                while fifo.size() > enc_audio.frame_size() as usize {
+                                    fifo.pop(&mut frame_into_encoder);
+                                    frame_into_encoder.set_rate(frame.rate());
+                                    frame_into_encoder.set_pts(Some(pts));
+                                    pts += frame_into_encoder.samples() as i64;
+                                    enc_audio.send_frame(&frame_into_encoder).unwrap();
+                                }
+                            } else {
+                                enc_audio.send_frame(&frame).unwrap();
+                            }
 
-            //                     pack = Packet::empty();
-            //                 }
-            //             }
-            //         }
-            //     }
-            // });
+                            let mut pack = Packet::empty();
+                            while enc_audio.receive_packet(&mut pack).is_ok() {
+                                pack.set_stream(ost_audio_idx);
+                                pack.rescale_ts(audio_decoder.time_base(), ost_audio_time_base);
+                                s.send(pack);
 
-            Some(AudioState {
-                chan: r,
-                // audio_input,
-            })
+                                pack = Packet::empty();
+                            }
+                        }
+                    }
+                }
+            });
 
-        } else {None};
-
+            Some(r)
+        } else {
+            None
+        };
 
         octx.write_header().unwrap();
         let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
@@ -1285,7 +1318,7 @@ impl EncState {
             history_state,
             sigusr1_flag,
             capture_size: (capture_w, capture_h),
-            audio,
+            audio_receiver,
         })
     }
 
@@ -1372,7 +1405,7 @@ impl EncState {
             encoded = Packet::empty();
         }
 
-        if let Some(AudioState { chan }) = &mut self.audio {
+        if let Some(chan) = &mut self.audio_receiver {
             while let Ok(pack) = chan.try_recv() {
                 let _ = pack.write_interleaved(&mut self.octx);
             }
