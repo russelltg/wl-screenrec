@@ -9,7 +9,7 @@ use std::{
     ptr::{null_mut, NonNull},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{channel, Receiver},
+        mpsc::{channel, Receiver, Sender},
         Arc,
     },
     thread::{sleep, spawn},
@@ -31,7 +31,7 @@ use ffmpeg::{
         AV_HWFRAME_MAP_WRITE, avformat_query_codec, FF_COMPLIANCE_STRICT, av_get_pix_fmt_name,
     },
     filter,
-    format::{self, context::Input, Pixel},
+    format::{self, context::Input, Pixel, Sample},
     frame::{self, video},
     media, Packet, Rational, Format, Dictionary, ChannelLayout,
 };
@@ -927,7 +927,66 @@ struct EncState {
 }
 
 struct AudioState {
-    fifo: Option<AudioFifo>,
+    // fifo: Option<AudioFifo>,
+    enc_audio: encoder::Audio,
+    format: Sample,
+    channel_layout: ChannelLayout,
+    // audio_input: Input,
+    ist_stream_index: usize,
+    audio_stream_time_base: Rational,
+    audio_decoder: decoder::Audio,
+    frame_sender: Sender<Packet>,
+
+    ost_audio_idx: usize,
+    ost_audio_time_base: Rational,
+}
+
+impl AudioState {
+    fn thread(mut self, mut audio_input: Input, mut fifo: Option<AudioFifo>) {
+        let mut frame = frame::Audio::empty();
+        let mut frame_into_encoder = frame::Audio::new(
+            self.format,
+            self.enc_audio.frame_size() as usize,
+            self.channel_layout,
+        );
+
+        let mut pts = 0;
+
+        for (stream, mut packet) in audio_input.packets() {
+            if stream.index() == self.ist_stream_index {
+                packet.rescale_ts(self.audio_stream_time_base, self.audio_decoder.time_base());
+                self.audio_decoder.send_packet(&packet).unwrap();
+
+                while self.audio_decoder.receive_frame(&mut frame).is_ok() {
+                    if let Some(fifo) = &mut fifo {
+                        fifo.push(&frame);
+                        while fifo.size() > self.enc_audio.frame_size() as usize {
+                            fifo.pop(&mut frame_into_encoder);
+                            frame_into_encoder.set_rate(frame.rate());
+                            frame_into_encoder.set_pts(Some(pts));
+                            pts += frame_into_encoder.samples() as i64;
+                            self.enc_audio.send_frame(&frame_into_encoder).unwrap();
+                            self.pop_frames_from_encoder();
+                        }
+                    } else {
+                        self.enc_audio.send_frame(&frame).unwrap();
+                        self.pop_frames_from_encoder();
+                    }
+                }
+            }
+        }
+    }
+
+    fn pop_frames_from_encoder(&mut self) {
+        let mut pack = Packet::empty();
+        while self.enc_audio.receive_packet(&mut pack).is_ok() {
+            pack.set_stream(self.ost_audio_idx);
+            pack.rescale_ts(self.audio_decoder.time_base(), self.ost_audio_time_base);
+            self.frame_sender.send(pack);
+
+            pack = Packet::empty();
+        }
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -1195,7 +1254,7 @@ impl EncState {
                 .best(ffmpeg::media::Type::Audio)
                 .unwrap();
 
-            let audio_stream_index = best_audio_stream.index();
+            let ist_stream_index = best_audio_stream.index();
             let audio_stream_time_base = best_audio_stream.time_base();
 
             let mut audio_decoder = Context::from_parameters(best_audio_stream.parameters())
@@ -1231,14 +1290,13 @@ impl EncState {
 
             ost_audio.set_parameters(&enc_audio);
 
-            let mut audiostate = AudioState { fifo: None };
-
+            let mut fifo = None;
             if let Some(codec) = enc_audio.codec() {
                 if !codec
                     .capabilities()
                     .contains(ffmpeg::codec::capabilities::Capabilities::VARIABLE_FRAME_SIZE)
                 {
-                    audiostate.fifo = Some(
+                    fifo = Some(
                         AudioFifo::new(
                             format,
                             channel_layout.channels(),
@@ -1249,45 +1307,22 @@ impl EncState {
                 }
             }
 
-            let (s, r) = channel();
-            spawn(move || {
-                let mut frame = frame::Audio::empty();
-                let mut frame_into_encoder =
-                    frame::Audio::new(format, enc_audio.frame_size() as usize, channel_layout);
+            let (frame_sender, r) = channel();
 
-                let mut pts = 0;
-
-                for (stream, mut packet) in audio_input.packets() {
-                    if stream.index() == audio_stream_index {
-                        packet.rescale_ts(audio_stream_time_base, audio_decoder.time_base());
-                        audio_decoder.send_packet(&packet).unwrap();
-
-                        while audio_decoder.receive_frame(&mut frame).is_ok() {
-                            if let Some(fifo) = &mut audiostate.fifo {
-                                fifo.push(&frame);
-                                while fifo.size() > enc_audio.frame_size() as usize {
-                                    fifo.pop(&mut frame_into_encoder);
-                                    frame_into_encoder.set_rate(frame.rate());
-                                    frame_into_encoder.set_pts(Some(pts));
-                                    pts += frame_into_encoder.samples() as i64;
-                                    enc_audio.send_frame(&frame_into_encoder).unwrap();
-                                }
-                            } else {
-                                enc_audio.send_frame(&frame).unwrap();
-                            }
-
-                            let mut pack = Packet::empty();
-                            while enc_audio.receive_packet(&mut pack).is_ok() {
-                                pack.set_stream(ost_audio_idx);
-                                pack.rescale_ts(audio_decoder.time_base(), ost_audio_time_base);
-                                s.send(pack);
-
-                                pack = Packet::empty();
-                            }
-                        }
-                    }
-                }
-            });
+            let mut audiostate = AudioState {
+                // fifo: None,
+                enc_audio,
+                format,
+                channel_layout,
+                // audio_input,
+                ist_stream_index,
+                audio_stream_time_base,
+                audio_decoder,
+                frame_sender,
+                ost_audio_idx,
+                ost_audio_time_base,
+            };
+            spawn(move || audiostate.thread(audio_input, fifo));
 
             Some(r)
         } else {
