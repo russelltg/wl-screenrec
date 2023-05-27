@@ -1,8 +1,12 @@
 # wl-screenrec
 
-High performance wlroots based screen recorder. Uses dma-buf transfers to get surface,
-and uses the GPU to do both the pixel format conversion and the encoding, making it about
-as performant as you could hope. 
+High performance screen recorder for Wayland. Requres a wayland compositor supporting
+[`wlr-output-management-unstable-v1`](https://wayland.app/protocols/wlr-output-management-unstable-v1) 
+and [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) protocols, 
+like [sway](https://swaywm.org/) and [Hyprland](https://hyprland.org/). 
+
+Uses dma-buf transfers to get surface, and uses the GPU to do both the pixel format conversion and the encoding,
+meaning the raw video data never touches the CPU, leaving it free to run your applications.
 
 Should work well on Intel and AMD GPUs. It also might work on desktop Nvidia GPUs with `libva-vdpau-driver`, 
 but it seems like vaapi doesn't work on laptop Nvidia GPUs. However, many of these systems have Intel GPUs as well,
