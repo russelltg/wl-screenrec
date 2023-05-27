@@ -31,6 +31,7 @@ use ffmpeg::{
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use thiserror::Error;
 use wayland_client::{
+    event_created_child,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
@@ -49,9 +50,16 @@ use wayland_protocols::{
         zxdg_output_v1::{self, ZxdgOutputV1},
     },
 };
-use wayland_protocols_wlr::screencopy::v1::client::{
-    zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-    zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+use wayland_protocols_wlr::{
+    output_management::v1::client::{
+        zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+        zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+        zwlr_output_mode_v1::ZwlrOutputModeV1,
+    },
+    screencopy::v1::client::{
+        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
+        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+    },
 };
 
 #[derive(Parser, Debug)]
@@ -193,20 +201,19 @@ struct PartialOutputInfo {
     loc: Option<(i32, i32)>,
     logical_size: Option<(i32, i32)>,
     refresh: Option<Rational>,
-    scale: Option<i32>,
     output: WlOutput,
 }
 impl PartialOutputInfo {
-    fn complete(&self) -> Option<OutputInfo> {
-        if let (Some(name), Some(loc), Some(logical_size), Some(refresh), Some(scale)) =
-            (&self.name, &self.loc, &self.logical_size, &self.refresh, &self.scale)
+    fn complete(&self, fractional_scale: f64) -> Option<OutputInfo> {
+        if let (Some(name), Some(loc), Some(logical_size), Some(refresh)) =
+            (&self.name, &self.loc, &self.logical_size, &self.refresh)
         {
             Some(OutputInfo {
                 loc: *loc,
                 name: name.clone(),
                 logical_size: *logical_size,
                 refresh: *refresh,
-                scale: *scale,
+                fractional_scale,
                 output: self.output.clone(),
             })
         } else {
@@ -220,13 +227,20 @@ struct OutputInfo {
     loc: (i32, i32),
     logical_size: (i32, i32), // size in pixels is logical_size * scale
     refresh: Rational,
-    scale: i32,
+    fractional_scale: f64,
     output: WlOutput,
 }
 
 impl OutputInfo {
     fn size_pixels(&self) -> (i32, i32) {
-        (self.logical_size.0 * self.scale, self.logical_size.1 * self.scale)
+        (
+            self.logical_to_pixel(self.logical_size.0),
+            self.logical_to_pixel(self.logical_size.1),
+        )
+    }
+
+    fn logical_to_pixel(&self, logical: i32) -> i32 {
+        (f64::from(logical) * self.fractional_scale).round() as i32
     }
 }
 
@@ -245,7 +259,8 @@ struct State {
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
-    partial_outputs: BTreeMap<u32, PartialOutputInfo>,
+    output_fractional_scales: BTreeMap<u32, (Option<String>, Option<f64>)>, // key is zwlr_output_head name (object ID) -> (name property, fractional scale)
+    partial_outputs: BTreeMap<u32, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: BTreeMap<u32, OutputInfo>,
 }
 
@@ -390,14 +405,9 @@ impl Dispatch<WlOutput, u32> for State {
     ) {
         match event {
             wl_output::Event::Mode { refresh, .. } => {
-                state.update_output_info(*data, qhandle, |info| {
+                state.update_output_info_wl_output(*data, qhandle, |info| {
                     info.refresh = Some(Rational(refresh, 1000))
                 });
-            }
-            wl_output::Event::Scale { factor } => {
-                state.update_output_info(*data, qhandle, |info| {
-                    info.scale = Some(factor)
-                })
             }
             _ => {}
         }
@@ -427,16 +437,72 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
     ) {
         match event {
             zxdg_output_v1::Event::Name { name } => {
-                state.update_output_info(*data, qhandle, |info| info.name = Some(name));
+                state.update_output_info_wl_output(*data, qhandle, |info| info.name = Some(name));
             }
             zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                state.update_output_info(*data, qhandle, |info| info.loc = Some((x, y)));
+                state.update_output_info_wl_output(*data, qhandle, |info| info.loc = Some((x, y)));
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
-                state.update_output_info(*data, qhandle, |info| info.logical_size = Some((width, height)));
+                state.update_output_info_wl_output(*data, qhandle, |info| {
+                    info.logical_size = Some((width, height))
+                });
             }
             _ => {}
         }
+    }
+}
+
+impl Dispatch<ZwlrOutputManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrOutputManagerV1,
+        _event: <ZwlrOutputManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+
+    event_created_child!(State, ZwlrOutputManagerV1, [
+        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrOutputHeadV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrOutputHeadV1,
+        event: <ZwlrOutputHeadV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        let id = proxy.id().protocol_id();
+        match event {
+            zwlr_output_head_v1::Event::Name { name } => {
+                state.update_output_info_zwlr_head(id, qhandle, |data| data.0 = Some(name));
+            }
+            zwlr_output_head_v1::Event::Scale { scale } => {
+                state.update_output_info_zwlr_head(id, qhandle, |data| data.1 = Some(scale));
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State, ZwlrOutputHeadV1, [
+        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwlrOutputModeV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrOutputModeV1,
+        _event: <ZwlrOutputModeV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
     }
 }
 
@@ -473,12 +539,23 @@ impl State {
                 (),
             )
             .unwrap();
+
+        // bind to get events so we can get the fractional scale
+        let _wlr_output_man: ZwlrOutputManagerV1 = gm
+            .bind(
+                &eq,
+                ZwlrOutputManagerV1::interface().version..=ZwlrOutputManagerV1::interface().version,
+                (),
+            )
+            .unwrap();
+
         let mut partial_outputs = BTreeMap::new();
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
                 let output: WlOutput =
                     registry.bind(g.name, WlOutput::interface().version, &eq, g.name);
 
+                // query so we get the dispatch callbacks
                 let _xdg = xdg_output_man.get_xdg_output(&output, &eq, g.name);
 
                 partial_outputs.insert(
@@ -488,7 +565,6 @@ impl State {
                         loc: None,
                         logical_size: None,
                         refresh: None,
-                        scale: None,
                         output,
                     },
                 );
@@ -507,6 +583,7 @@ impl State {
                 wl_output: None,
                 partial_outputs,
                 outputs: BTreeMap::new(),
+                output_fractional_scales: BTreeMap::new(),
             },
             queue,
         )
@@ -552,18 +629,54 @@ impl State {
             .push_back((surf, mapping, dma_params, capture, buf));
     }
 
-    fn update_output_info(
+    fn update_output_info_wl_output(
         &mut self,
-        name: u32,
+        wl_output_name: u32,
         qhandle: &QueueHandle<State>,
         f: impl FnOnce(&mut PartialOutputInfo),
     ) {
-        let output = self.partial_outputs.get_mut(&name).unwrap();
+        let output = self.partial_outputs.get_mut(&wl_output_name).unwrap();
         f(output);
-        if let Some(info) = output.complete() {
-            self.outputs.insert(name, info);
+
+        // see if the associated zwlr_head has been probed yet
+        if let Some(name) = &output.name {
+            if let Some((_head_name, (_name, Some(scale)))) = self
+                .output_fractional_scales
+                .iter()
+                .find(|elem| elem.1 .0.as_ref() == Some(name))
+            {
+                if let Some(info) = output.complete(*scale) {
+                    self.outputs.insert(wl_output_name, info);
+                    self.start_if_output_probe_complete(qhandle);
+                }
+            }
         }
-        self.start_if_output_probe_complete(qhandle);
+    }
+
+    fn update_output_info_zwlr_head(
+        &mut self,
+        zwlr_head_name: u32,
+        qhandle: &QueueHandle<State>,
+        f: impl FnOnce(&mut (Option<String>, Option<f64>)),
+    ) {
+        let output = self
+            .output_fractional_scales
+            .entry(zwlr_head_name)
+            .or_default();
+        f(output);
+
+        if let (Some(name), Some(fractional_scale)) = output {
+            if let Some((wl_output_name, partial_output)) = self
+                .partial_outputs
+                .iter()
+                .find(|po| po.1.name.as_ref() == Some(name))
+            {
+                if let Some(info) = partial_output.complete(*fractional_scale) {
+                    self.outputs.insert(*wl_output_name, info);
+                    self.start_if_output_probe_complete(qhandle);
+                }
+            }
+        }
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
@@ -606,7 +719,14 @@ impl State {
                     x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
                         y >= i.loc.1 && y + h <= i.loc.1 + i.logical_size.1 // y within
                 }) {
-                    (output, (x - output.loc.0, y - output.loc.1), (w * output.scale, h * output.scale))
+                    (
+                        output,
+                        (
+                            output.logical_to_pixel(x - output.loc.0),
+                            output.logical_to_pixel(y - output.loc.1),
+                        ),
+                        (output.logical_to_pixel(w), output.logical_to_pixel(h)),
+                    )
                 } else {
                     println!(
                         "region {},{} {}x{} is not entirely within one output, bailing",
