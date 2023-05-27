@@ -191,20 +191,22 @@ fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
 struct PartialOutputInfo {
     name: Option<String>,
     loc: Option<(i32, i32)>,
-    size: Option<(i32, i32)>,
+    logical_size: Option<(i32, i32)>,
     refresh: Option<Rational>,
+    scale: Option<i32>,
     output: WlOutput,
 }
 impl PartialOutputInfo {
     fn complete(&self) -> Option<OutputInfo> {
-        if let (Some(name), Some(loc), Some(size), Some(refresh)) =
-            (&self.name, &self.loc, &self.size, &self.refresh)
+        if let (Some(name), Some(loc), Some(logical_size), Some(refresh), Some(scale)) =
+            (&self.name, &self.loc, &self.logical_size, &self.refresh, &self.scale)
         {
             Some(OutputInfo {
                 loc: *loc,
                 name: name.clone(),
-                size: *size,
+                logical_size: *logical_size,
                 refresh: *refresh,
+                scale: *scale,
                 output: self.output.clone(),
             })
         } else {
@@ -216,9 +218,16 @@ impl PartialOutputInfo {
 struct OutputInfo {
     name: String,
     loc: (i32, i32),
-    size: (i32, i32),
+    logical_size: (i32, i32), // size in pixels is logical_size * scale
     refresh: Rational,
+    scale: i32,
     output: WlOutput,
+}
+
+impl OutputInfo {
+    fn size_pixels(&self) -> (i32, i32) {
+        (self.logical_size.0 * self.scale, self.logical_size.1 * self.scale)
+    }
 }
 
 struct State {
@@ -385,6 +394,11 @@ impl Dispatch<WlOutput, u32> for State {
                     info.refresh = Some(Rational(refresh, 1000))
                 });
             }
+            wl_output::Event::Scale { factor } => {
+                state.update_output_info(*data, qhandle, |info| {
+                    info.scale = Some(factor)
+                })
+            }
             _ => {}
         }
     }
@@ -419,7 +433,7 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
                 state.update_output_info(*data, qhandle, |info| info.loc = Some((x, y)));
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
-                state.update_output_info(*data, qhandle, |info| info.size = Some((width, height)));
+                state.update_output_info(*data, qhandle, |info| info.logical_size = Some((width, height)));
             }
             _ => {}
         }
@@ -472,8 +486,9 @@ impl State {
                     PartialOutputInfo {
                         name: None,
                         loc: None,
-                        size: None,
+                        logical_size: None,
                         refresh: None,
+                        scale: None,
                         output,
                     },
                 );
@@ -569,12 +584,12 @@ impl State {
                 }
 
                 let output = self.outputs.iter().next().unwrap().1;
-                (output, (0, 0), output.size)
+                (output, (0, 0), output.size_pixels())
             }
             (None, disp) => {
                 // --output but no --geoemetry
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
-                    (output, (0, 0), output.size)
+                    (output, (0, 0), output.size_pixels())
                 } else {
                     println!("display {} not found, bailing", disp);
                     RUNNING.store(false, Ordering::SeqCst);
@@ -588,10 +603,10 @@ impl State {
                 let h = h as i32;
                 // --geometry but no --output
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| {
-                    x >= i.loc.0 && x + w <= i.loc.0 + i.size.0 && // x within
-                        y >= i.loc.1 && y + h <= i.loc.1 + i.size.1 // y within
+                    x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
+                        y >= i.loc.1 && y + h <= i.loc.1 + i.logical_size.1 // y within
                 }) {
-                    (output, (x - output.loc.0, y - output.loc.1), (w, h))
+                    (output, (x - output.loc.0, y - output.loc.1), (w * output.scale, h * output.scale))
                 } else {
                     println!(
                         "region {},{} {}x{} is not entirely within one output, bailing",
@@ -614,8 +629,8 @@ impl State {
         self.enc = Some(EncState::new(
             &self.args,
             output.refresh,
-            output.size.0,
-            output.size.1,
+            output.size_pixels().0,
+            output.size_pixels().1,
             x,
             y,
             w,
@@ -680,11 +695,12 @@ fn make_video_params(
 }
 
 impl EncState {
+    // assumed that capture_{w,h}
     fn new(
         args: &Args,
         refresh: Rational,
-        capture_w: i32,
-        capture_h: i32,
+        capture_w: i32, // pixels
+        capture_h: i32, // pixels
         encode_x: i32,
         encode_y: i32,
         encode_w: i32,
