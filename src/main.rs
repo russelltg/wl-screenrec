@@ -35,10 +35,10 @@ use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
-        wl_output::{self, WlOutput},
+        wl_output::{self, Mode, WlOutput},
         wl_registry::WlRegistry,
     },
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
     wp::linux_dmabuf::zv1::client::{
@@ -200,20 +200,26 @@ struct PartialOutputInfo {
     name: Option<String>,
     loc: Option<(i32, i32)>,
     logical_size: Option<(i32, i32)>,
+    size_pixels: Option<(i32, i32)>,
     refresh: Option<Rational>,
     output: WlOutput,
 }
 impl PartialOutputInfo {
     fn complete(&self, fractional_scale: f64) -> Option<OutputInfo> {
-        if let (Some(name), Some(loc), Some(logical_size), Some(refresh)) =
-            (&self.name, &self.loc, &self.logical_size, &self.refresh)
-        {
+        if let (Some(name), Some(loc), Some(logical_size), Some(size_pixels), Some(refresh)) = (
+            &self.name,
+            &self.loc,
+            &self.logical_size,
+            &self.size_pixels,
+            &self.refresh,
+        ) {
             Some(OutputInfo {
                 loc: *loc,
                 name: name.clone(),
                 logical_size: *logical_size,
                 refresh: *refresh,
                 fractional_scale,
+                size_pixels: *size_pixels,
                 output: self.output.clone(),
             })
         } else {
@@ -225,20 +231,14 @@ impl PartialOutputInfo {
 struct OutputInfo {
     name: String,
     loc: (i32, i32),
-    logical_size: (i32, i32), // size in pixels is logical_size * scale
+    logical_size: (i32, i32),
+    size_pixels: (i32, i32),
     refresh: Rational,
     fractional_scale: f64,
     output: WlOutput,
 }
 
 impl OutputInfo {
-    fn size_pixels(&self) -> (i32, i32) {
-        (
-            self.logical_to_pixel(self.logical_size.0),
-            self.logical_to_pixel(self.logical_size.1),
-        )
-    }
-
     fn logical_to_pixel(&self, logical: i32) -> i32 {
         (f64::from(logical) * self.fractional_scale).round() as i32
     }
@@ -404,10 +404,18 @@ impl Dispatch<WlOutput, u32> for State {
         qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            wl_output::Event::Mode { refresh, .. } => {
-                state.update_output_info_wl_output(*data, qhandle, |info| {
-                    info.refresh = Some(Rational(refresh, 1000))
-                });
+            wl_output::Event::Mode {
+                refresh,
+                flags: WEnum::Value(flags),
+                width,
+                height,
+            } => {
+                if flags.contains(Mode::Current) {
+                    state.update_output_info_wl_output(*data, qhandle, |info| {
+                        info.refresh = Some(Rational(refresh, 1000));
+                        info.size_pixels = Some((width, height));
+                    });
+                }
             }
             _ => {}
         }
@@ -564,6 +572,7 @@ impl State {
                         name: None,
                         loc: None,
                         logical_size: None,
+                        size_pixels: None,
                         refresh: None,
                         output,
                     },
@@ -697,12 +706,12 @@ impl State {
                 }
 
                 let output = self.outputs.iter().next().unwrap().1;
-                (output, (0, 0), output.size_pixels())
+                (output, (0, 0), output.size_pixels)
             }
             (None, disp) => {
                 // --output but no --geoemetry
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
-                    (output, (0, 0), output.size_pixels())
+                    (output, (0, 0), output.size_pixels)
                 } else {
                     println!("display {} not found, bailing", disp);
                     RUNNING.store(false, Ordering::SeqCst);
@@ -749,8 +758,8 @@ impl State {
         self.enc = Some(EncState::new(
             &self.args,
             output.refresh,
-            output.size_pixels().0,
-            output.size_pixels().1,
+            output.size_pixels.0,
+            output.size_pixels.1,
             x,
             y,
             w,
