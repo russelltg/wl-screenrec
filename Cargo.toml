@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-clap = { version = "4", default-features = false, features = ["std", "derive"] }
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "color", "usage", "error-context", "suggestions"] }
 wayland-client = "0.30"
 wayland-protocols = { version = "0.30", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.1", features = ["client"] }
