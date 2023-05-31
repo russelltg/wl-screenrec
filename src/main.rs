@@ -29,6 +29,7 @@ use ffmpeg::{
     Error, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
+use signal_hook::consts::SIGINT;
 use thiserror::Error;
 use wayland_client::{
     event_created_child,
@@ -262,6 +263,7 @@ struct State {
     output_fractional_scales: BTreeMap<u32, (Option<String>, Option<f64>)>, // key is zwlr_output_head name (object ID) -> (name property, fractional scale)
     partial_outputs: BTreeMap<u32, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: BTreeMap<u32, OutputInfo>,
+    quit_flag: Arc<AtomicBool>,
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -338,7 +340,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
                 println!("Failed to screencopy!");
-                RUNNING.store(false, Ordering::SeqCst)
+                state.quit_flag.store(true, Ordering::SeqCst)
             }
 
             _ => {}
@@ -515,7 +517,7 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
 }
 
 impl State {
-    fn new(conn: &Connection, args: Args) -> (Self, EventQueue<Self>) {
+    fn new(conn: &Connection, args: Args, quit_flag: Arc<AtomicBool>) -> (Self, EventQueue<Self>) {
         let display = conn.display();
 
         let (gm, queue) = registry_queue_init(conn).unwrap();
@@ -593,6 +595,7 @@ impl State {
                 partial_outputs,
                 outputs: BTreeMap::new(),
                 output_fractional_scales: BTreeMap::new(),
+                quit_flag,
             },
             queue,
         )
@@ -701,7 +704,7 @@ impl State {
                 // default case, capture whole monitor
                 if self.outputs.len() != 1 {
                     println!("multiple displays and no --geometry or --output supplied, bailing");
-                    RUNNING.store(false, Ordering::SeqCst);
+                    self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
 
@@ -714,7 +717,7 @@ impl State {
                     (output, (0, 0), output.size_pixels)
                 } else {
                     println!("display {} not found, bailing", disp);
-                    RUNNING.store(false, Ordering::SeqCst);
+                    self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
             }
@@ -741,13 +744,13 @@ impl State {
                         "region {},{} {}x{} is not entirely within one output, bailing",
                         x, y, w, h
                     );
-                    RUNNING.store(false, Ordering::SeqCst);
+                    self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
             }
             (Some(_), _) => {
                 println!("both --geometry and --output were passed, which is not allowed, bailing");
-                RUNNING.store(false, Ordering::SeqCst);
+                self.quit_flag.store(true, Ordering::SeqCst);
                 return;
             }
         };
@@ -1128,10 +1131,10 @@ fn filter(
     (g, Rational::new(1, 1_000_000_000))
 }
 
-static RUNNING: AtomicBool = AtomicBool::new(true);
-
 fn main() {
-    ctrlc::set_handler(move || RUNNING.store(false, Ordering::SeqCst)).unwrap();
+    let quit_flag = Arc::new(AtomicBool::new(false));
+
+    signal_hook::flag::register(SIGINT, Arc::clone(&quit_flag)).unwrap();
 
     ffmpeg_next::init().unwrap();
 
@@ -1143,9 +1146,9 @@ fn main() {
 
     let conn = Connection::connect_to_env().unwrap();
 
-    let (mut state, mut queue) = State::new(&conn, args);
+    let (mut state, mut queue) = State::new(&conn, args, quit_flag.clone());
 
-    while RUNNING.load(Ordering::SeqCst) {
+    while !quit_flag.load(Ordering::SeqCst) {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 

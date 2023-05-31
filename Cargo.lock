@@ -113,16 +113,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2da6da31387c7e4ef160ffab6d5e7f00c42626fe39aea70a7b0f1773f7dd6c1b"
 
 [[package]]
-name = "ctrlc"
-version = "3.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a011bbe2c35ce9c1f143b7af6f94f29a167beb4cd1d29e6740ce836f723120e"
-dependencies = [
- "nix",
- "windows-sys",
-]
-
-[[package]]
 name = "dlib"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -379,6 +369,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "43b2853a4d09f215c24cc5489c992ce46052d359b5109343cbafbf26bc62f8a3"
 
 [[package]]
+name = "signal-hook"
+version = "0.3.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "732768f1176d21d09e076c23a93123d40bba92d50c4058da34d45c8de8e682b9"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
+name = "signal-hook-registry"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8229b473baa5980ac72ef434c4415e70c4b5e71b423043adb4ba059f89c99a1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -611,10 +620,10 @@ name = "wl-screenrec"
 version = "0.1.0"
 dependencies = [
  "clap",
- "ctrlc",
  "drm-fourcc",
  "ffmpeg-next",
  "human-size",
+ "signal-hook",
  "thiserror",
  "wayland-client",
  "wayland-protocols",
