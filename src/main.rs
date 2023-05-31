@@ -18,7 +18,7 @@ use ffmpeg::{
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_free, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        av_free, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Pixel},
