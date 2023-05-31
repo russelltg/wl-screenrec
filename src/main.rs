@@ -29,7 +29,7 @@ use ffmpeg::{
     Error, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
-use signal_hook::consts::SIGINT;
+use signal_hook::consts::{SIGINT, SIGUSR1};
 use thiserror::Error;
 use wayland_client::{
     event_created_child,
@@ -99,6 +99,12 @@ struct Args {
 
     #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps")]
     bitrate: Size,
+
+    #[clap(long,
+        help="run in a mode where the screen is recorded, but nothing is written to the output file until SIGUSR1 is sent to the process. Then, it writes the most recent N seconds to a file and continues recording", 
+        value_parser=parse_duration
+    )]
+    history: Option<Duration>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -145,6 +151,11 @@ fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
     }
 
     Ok((startx, starty, sizex, sizey))
+}
+
+fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
+    let seconds = arg.parse()?;
+    Ok(std::time::Duration::from_secs(seconds))
 }
 
 struct FpsCounter {
@@ -264,6 +275,12 @@ struct State {
     partial_outputs: BTreeMap<u32, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: BTreeMap<u32, OutputInfo>,
     quit_flag: Arc<AtomicBool>,
+    sigusr1_flag: Arc<AtomicBool>,
+}
+
+enum HistoryState {
+    RecordingHistory(Duration, VecDeque<Packet>), // --history specified, but SIGUSR1 not received yet. State is (duration of history, history)
+    Recording(i64), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset, which is required when using history
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -517,7 +534,12 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
 }
 
 impl State {
-    fn new(conn: &Connection, args: Args, quit_flag: Arc<AtomicBool>) -> (Self, EventQueue<Self>) {
+    fn new(
+        conn: &Connection,
+        args: Args,
+        quit_flag: Arc<AtomicBool>,
+        sigusr1_flag: Arc<AtomicBool>,
+    ) -> (Self, EventQueue<Self>) {
         let display = conn.display();
 
         let (gm, queue) = registry_queue_init(conn).unwrap();
@@ -596,6 +618,7 @@ impl State {
                 outputs: BTreeMap::new(),
                 output_fractional_scales: BTreeMap::new(),
                 quit_flag,
+                sigusr1_flag,
             },
             queue,
         )
@@ -767,6 +790,7 @@ impl State {
             y,
             w,
             h,
+            Arc::clone(&self.sigusr1_flag),
         ));
         self.queue_copy(qhandle);
     }
@@ -781,6 +805,9 @@ struct EncState {
     octx_time_base: Rational,
     vid_stream_idx: usize,
     capture_size: (i32, i32),
+    verbose: bool,
+    history_state: HistoryState,
+    sigusr1_flag: Arc<AtomicBool>,
 }
 
 fn make_video_params(
@@ -837,6 +864,7 @@ impl EncState {
         encode_y: i32,
         encode_w: i32,
         encode_h: i32,
+        sigusr1_flag: Arc<AtomicBool>,
     ) -> Self {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
@@ -925,6 +953,11 @@ impl EncState {
             ffmpeg_next::format::context::output::dump(&octx, 0, Some(&args.filename));
         }
 
+        let history_state = match args.history {
+            Some(history) => HistoryState::RecordingHistory(history, VecDeque::new()),
+            None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
+        };
+
         EncState {
             filter,
             enc,
@@ -934,9 +967,32 @@ impl EncState {
             vid_stream_idx,
             frames_rgb,
             capture_size: (capture_w, capture_h),
+            verbose: args.verbose,
+            history_state,
+            sigusr1_flag,
         }
     }
     fn process_ready(&mut self) {
+        // if we were recording history and got the SIGUSR1 flag
+        if let (HistoryState::RecordingHistory(_, hist), true) = (
+            &mut self.history_state,
+            self.sigusr1_flag.load(Ordering::SeqCst),
+        ) {
+            // write history to container
+            let pts_offset = hist.front().map(|first| first.pts().unwrap()).unwrap_or(0);
+
+            for packet in hist {
+                packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
+                packet.set_dts(packet.dts().map(|dts| dts - pts_offset));
+                let _ = packet.write_interleaved(&mut self.octx).unwrap();
+            }
+
+            eprintln!("SIGUSR1 received, flushing history");
+
+            // transition history state
+            self.history_state = HistoryState::Recording(pts_offset);
+        }
+
         let mut yuv_frame = frame::Video::empty();
         while self
             .filter
@@ -954,7 +1010,49 @@ impl EncState {
         while self.enc.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
             encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
-            let _ = encoded.write_interleaved(&mut self.octx);
+
+            match &mut self.history_state {
+                HistoryState::Recording(pts_offset) => {
+                    encoded.set_pts(Some(encoded.pts().unwrap() - *pts_offset));
+                    encoded.set_dts(encoded.dts().map(|dts| dts - *pts_offset));
+                    let _ = encoded.write_interleaved(&mut self.octx).unwrap();
+                }
+                HistoryState::RecordingHistory(history_dur, history) => {
+                    // discard old history if necessary
+
+                    // find first key packet (other than the first one)
+                    // we want to make sure the first packet is always a key packet
+                    while let Some(key_idx_minus_one) =
+                        history.iter().skip(1).position(|packet| packet.is_key())
+                    {
+                        let key_idx = key_idx_minus_one + 1;
+                        let key_pts = history[key_idx].pts().unwrap();
+
+                        let current_history_size_pts =
+                            u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
+                        let current_history_size = Duration::from_nanos(
+                            current_history_size_pts * self.octx_time_base.0 as u64 * 1_000_000_000
+                                / self.octx_time_base.1 as u64,
+                        );
+
+                        if current_history_size > *history_dur {
+                            if self.verbose {
+                                eprintln!(
+                                    "history is {:?} > {:?}, popping from history buffer",
+                                    current_history_size, history_dur
+                                );
+                            }
+                            history.drain(0..key_idx);
+                        } else {
+                            break;
+                        }
+                    }
+
+                    history.push_back(encoded.clone());
+                }
+            }
+
+            encoded = Packet::empty();
         }
     }
 
@@ -1133,12 +1231,14 @@ fn filter(
 
 fn main() {
     let quit_flag = Arc::new(AtomicBool::new(false));
+    let sigusr1_flag = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register(SIGINT, Arc::clone(&quit_flag)).unwrap();
-
-    ffmpeg_next::init().unwrap();
+    signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
 
     let args = Args::parse();
+
+    ffmpeg_next::init().unwrap();
 
     if args.verbose {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
@@ -1146,7 +1246,7 @@ fn main() {
 
     let conn = Connection::connect_to_env().unwrap();
 
-    let (mut state, mut queue) = State::new(&conn, args, quit_flag.clone());
+    let (mut state, mut queue) = State::new(&conn, args, quit_flag.clone(), sigusr1_flag);
 
     while !quit_flag.load(Ordering::SeqCst) {
         queue.blocking_dispatch(&mut state).unwrap();

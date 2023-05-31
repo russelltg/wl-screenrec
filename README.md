@@ -70,6 +70,13 @@ wl-screenrec -g "$(slurp)"    # use slurp
 wl-screenrec -g "0,0 128x128" # manual region
 ```
 
+Record with history
+```bash
+wl-screenrec --history 10 & # record the most recent 10 seconds into memory, not writing into the file
+# ... some important event occurs
+killall -USR1 wl-screenrec  # flush the most recent 10 seconds onto the file, and start appending to the file like recording normally
+```
+
 # Known issues
 
 - Cannot capture a region that spans more than one display. This is probably possible but quite difficult, espeicially with potential differences in refresh rate. Probably will never be supported.
