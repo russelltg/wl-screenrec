@@ -196,7 +196,7 @@ fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
         let sts = av_hwframe_map(
             dst.as_mut_ptr(),
             frame.as_ptr(),
-            AV_HWFRAME_MAP_WRITE as c_int | AV_HWFRAME_MAP_READ as c_int,
+            AV_HWFRAME_MAP_WRITE as c_int,
         );
         assert_eq!(sts, 0);
 
