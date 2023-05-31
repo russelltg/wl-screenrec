@@ -2,9 +2,8 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    ffi::{c_int, CString},
+    ffi::{c_int},
     num::ParseIntError,
-    ptr::null_mut,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -18,15 +17,12 @@ use ffmpeg::{
     codec::{self},
     dict, encoder,
     ffi::{
-        av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_free, av_hwdevice_ctx_create, av_hwframe_ctx_alloc, av_hwframe_ctx_init,
-        av_hwframe_get_buffer, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor,
-        AVHWFramesContext, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
+        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
+        av_free, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Pixel},
-    frame::{self, video},
-    Error, Packet, Rational,
+    frame::{self, video}, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGINT, SIGUSR1};
@@ -62,6 +58,9 @@ use wayland_protocols_wlr::{
         zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
     },
 };
+
+mod avhw;
+use avhw::{AvHwDevCtx, AvHwFrameCtx};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -816,8 +815,8 @@ fn make_video_params(
     encode_h: i32,
     framerate: Rational,
     global_header: bool,
-    hw_device_ctx: &AvHwDevCtx,
-    frames_yuv: &AvHwFrameCtx,
+    hw_device_ctx: &mut AvHwDevCtx,
+    frames_yuv: &mut AvHwFrameCtx,
 ) -> encoder::video::Video {
     let codec =
         ffmpeg_next::encoder::find_by_name(if args.hw { "h264_vaapi" } else { "libx264" }).unwrap();
@@ -842,8 +841,8 @@ fn make_video_params(
         enc.set_format(Pixel::VAAPI);
 
         unsafe {
-            (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.ptr as *mut _);
-            (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.ptr as *mut _);
+            (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.as_mut_ptr());
+            (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.as_mut_ptr());
             (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
         }
     } else {
@@ -871,12 +870,12 @@ impl EncState {
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
-        let frames_rgb = hw_device_ctx
+        let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
             .unwrap();
 
         let (filter, filter_timebase) = filter(
-            &frames_rgb,
+            &mut frames_rgb,
             args.hw,
             capture_w,
             capture_h,
@@ -886,7 +885,7 @@ impl EncState {
             encode_h,
         );
 
-        let frames_yuv = hw_device_ctx
+        let mut frames_yuv = hw_device_ctx
             .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, encode_w, encode_h)
             .unwrap();
 
@@ -900,8 +899,8 @@ impl EncState {
             encode_h,
             refresh,
             global_header,
-            &hw_device_ctx,
-            &frames_yuv,
+            &mut hw_device_ctx,
+            &mut frames_yuv,
         );
 
         let enc = if args.hw {
@@ -923,8 +922,8 @@ impl EncState {
                             encode_h,
                             refresh,
                             global_header,
-                            &hw_device_ctx,
-                            &frames_yuv,
+                            &mut hw_device_ctx,
+                            &mut frames_yuv,
                         )
                         .open_with(regular_opts)
                         .unwrap()
@@ -1071,98 +1070,8 @@ impl EncState {
     }
 }
 
-struct AvHwDevCtx {
-    ptr: *mut ffmpeg::sys::AVBufferRef,
-}
-
-impl AvHwDevCtx {
-    fn new_libva(dri_device: &str) -> Self {
-        unsafe {
-            let mut hw_device_ctx = null_mut();
-
-            let opts = dict! {
-                "connection_type" => "drm"
-            };
-
-            let dev_cstr = CString::new(dri_device).unwrap();
-            let sts = av_hwdevice_ctx_create(
-                &mut hw_device_ctx,
-                ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-                dev_cstr.as_ptr(),
-                opts.as_mut_ptr(),
-                0,
-            );
-            assert_eq!(sts, 0);
-
-            Self { ptr: hw_device_ctx }
-        }
-    }
-
-    fn create_frame_ctx(
-        &mut self,
-        pixfmt: AVPixelFormat,
-        width: i32,
-        height: i32,
-    ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
-        unsafe {
-            let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
-            let hwframe_casted = (*hwframe).data as *mut AVHWFramesContext;
-
-            // ffmpeg does not expose RGB vaapi
-            (*hwframe_casted).format = Pixel::VAAPI.into();
-            (*hwframe_casted).sw_format = pixfmt;
-            (*hwframe_casted).width = width;
-            (*hwframe_casted).height = height;
-            (*hwframe_casted).initial_pool_size = 5;
-
-            let sts = av_hwframe_ctx_init(hwframe);
-            if sts != 0 {
-                return Err(Error::from(sts));
-            }
-
-            let ret = Ok(AvHwFrameCtx {
-                ptr: av_buffer_ref(hwframe),
-            });
-
-            av_buffer_unref(&mut hwframe);
-
-            ret
-        }
-    }
-}
-
-impl Drop for AvHwDevCtx {
-    fn drop(&mut self) {
-        unsafe {
-            av_buffer_unref(&mut self.ptr);
-        }
-    }
-}
-
-struct AvHwFrameCtx {
-    ptr: *mut ffmpeg::sys::AVBufferRef,
-}
-
-impl Drop for AvHwFrameCtx {
-    fn drop(&mut self) {
-        unsafe {
-            av_buffer_unref(&mut self.ptr);
-        }
-    }
-}
-
-impl AvHwFrameCtx {
-    fn alloc(&mut self) -> Result<frame::Video, Error> {
-        let mut frame = ffmpeg_next::frame::video::Video::empty();
-        match unsafe { av_hwframe_get_buffer(self.ptr, frame.as_mut_ptr(), 0) } {
-            0 => Ok(frame),
-            e => Err(Error::from(e)),
-        }
-    }
-}
-
 fn filter(
-    inctx: &AvHwFrameCtx,
+    inctx: &mut AvHwFrameCtx,
     hw: bool,
     capture_width: i32,
     capture_height: i32,
@@ -1190,7 +1099,7 @@ fn filter(
         p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
         p.time_base.num = 1;
         p.time_base.den = 1_000_000_000;
-        p.hw_frames_ctx = inctx.ptr;
+        p.hw_frames_ctx = inctx.as_mut_ptr();
 
         let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
         assert_eq!(sts, 0);
