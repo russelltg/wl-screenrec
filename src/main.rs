@@ -2,7 +2,7 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    ffi::{c_int},
+    ffi::c_int,
     num::ParseIntError,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -17,12 +17,14 @@ use ffmpeg::{
     codec::{self},
     dict, encoder,
     ffi::{
-        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_free, av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE,
+        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
+        av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat,
+        AV_HWFRAME_MAP_WRITE,
     },
     filter,
     format::{self, Pixel},
-    frame::{self, video}, Packet, Rational,
+    frame::{self, video},
+    Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGINT, SIGUSR1};
@@ -421,21 +423,19 @@ impl Dispatch<WlOutput, u32> for State {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_output::Event::Mode {
-                refresh,
-                flags: WEnum::Value(flags),
-                width,
-                height,
-            } => {
-                if flags.contains(Mode::Current) {
-                    state.update_output_info_wl_output(*data, qhandle, |info| {
-                        info.refresh = Some(Rational(refresh, 1000));
-                        info.size_pixels = Some((width, height));
-                    });
-                }
+        if let wl_output::Event::Mode {
+            refresh,
+            flags: WEnum::Value(flags),
+            width,
+            height,
+        } = event
+        {
+            if flags.contains(Mode::Current) {
+                state.update_output_info_wl_output(*data, qhandle, |info| {
+                    info.refresh = Some(Rational(refresh, 1000));
+                    info.size_pixels = Some((width, height));
+                });
             }
-            _ => {}
         }
     }
 }
@@ -783,12 +783,9 @@ impl State {
         self.enc = Some(EncState::new(
             &self.args,
             output.refresh,
-            output.size_pixels.0,
-            output.size_pixels.1,
-            x,
-            y,
-            w,
-            h,
+            output.size_pixels,
+            (x, y),
+            (w, h),
             Arc::clone(&self.sigusr1_flag),
         ));
         self.queue_copy(qhandle);
@@ -857,12 +854,9 @@ impl EncState {
     fn new(
         args: &Args,
         refresh: Rational,
-        capture_w: i32, // pixels
-        capture_h: i32, // pixels
-        encode_x: i32,
-        encode_y: i32,
-        encode_w: i32,
-        encode_h: i32,
+        (capture_w, capture_h): (i32, i32), // pixels
+        (encode_x, encode_y): (i32, i32),
+        (encode_w, encode_h): (i32, i32),
         sigusr1_flag: Arc<AtomicBool>,
     ) -> Self {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
@@ -877,12 +871,9 @@ impl EncState {
         let (filter, filter_timebase) = filter(
             &mut frames_rgb,
             args.hw,
-            capture_w,
-            capture_h,
-            encode_x,
-            encode_y,
-            encode_w,
-            encode_h,
+            (capture_w, capture_h),
+            (encode_x, encode_y),
+            (encode_w, encode_h),
         );
 
         let mut frames_yuv = hw_device_ctx
@@ -983,7 +974,7 @@ impl EncState {
             for packet in hist {
                 packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
                 packet.set_dts(packet.dts().map(|dts| dts - pts_offset));
-                let _ = packet.write_interleaved(&mut self.octx).unwrap();
+                packet.write_interleaved(&mut self.octx).unwrap();
             }
 
             eprintln!("SIGUSR1 received, flushing history");
@@ -1014,7 +1005,7 @@ impl EncState {
                 HistoryState::Recording(pts_offset) => {
                     encoded.set_pts(Some(encoded.pts().unwrap() - *pts_offset));
                     encoded.set_dts(encoded.dts().map(|dts| dts - *pts_offset));
-                    let _ = encoded.write_interleaved(&mut self.octx).unwrap();
+                    encoded.write_interleaved(&mut self.octx).unwrap();
                 }
                 HistoryState::RecordingHistory(history_dur, history) => {
                     // discard old history if necessary
@@ -1073,12 +1064,9 @@ impl EncState {
 fn filter(
     inctx: &mut AvHwFrameCtx,
     hw: bool,
-    capture_width: i32,
-    capture_height: i32,
-    enc_x: i32,
-    enc_y: i32,
-    enc_width: i32,
-    enc_height: i32,
+    (capture_width, capture_height): (i32, i32),
+    (enc_x, enc_y): (i32, i32),
+    (enc_width, enc_height): (i32, i32),
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(

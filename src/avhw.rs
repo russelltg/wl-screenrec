@@ -1,7 +1,14 @@
-use std::{ptr::null_mut, ffi::CString};
+use std::{ffi::CString, ptr::null_mut};
 
-use ffmpeg::{dict, ffi::{av_hwdevice_ctx_create, AVPixelFormat, av_hwframe_ctx_alloc, AVHWFramesContext, av_hwframe_ctx_init, av_buffer_ref, av_buffer_unref, av_hwframe_get_buffer}, format::Pixel, frame};
-
+use ffmpeg::{
+    dict,
+    ffi::{
+        av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext, AVPixelFormat,
+    },
+    format::Pixel,
+    frame,
+};
 
 pub struct AvHwDevCtx {
     ptr: *mut ffmpeg::sys::AVBufferRef,
