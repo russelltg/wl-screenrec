@@ -54,6 +54,19 @@ Install ffmpeg, which is a required dependency.
 cargo install --git https://github.com/russelltg/wl-screenrec
 ```
 
+## FreeBSD
+
+There is currently an [upstream bug](https://github.com/zmwangx/rust-ffmpeg/pull/152) preventing
+builds on FreeBSD from succeeding, but you can fix this by patching the `rust-ffmpeg` dependency:
+
+```bash
+git clone https://github.com/russelltg/wl-screenrec
+cd wl-screenrec
+echo '[patch.crates-io]
+ffmpeg-next = { git = "https://github.com/russelltg/rust-ffmpeg", branch = "fix_freebsd_build" }' >> Cargo.toml
+cargo install --path .
+```
+
 # Usage
 
 Capture entire output:
