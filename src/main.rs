@@ -12,14 +12,15 @@ use std::{
     time::Duration,
 };
 
+use anyhow::bail;
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec::{self},
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_hwframe_map, avcodec_alloc_context3, AVDRMFrameDescriptor, AVPixelFormat,
-        AV_HWFRAME_MAP_WRITE,
+        av_hwframe_map, avcodec_alloc_context3, avformat_query_codec, AVDRMFrameDescriptor,
+        AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
@@ -780,14 +781,23 @@ impl State {
         println!("Using output {}", output.name);
 
         self.wl_output = Some(output.output.clone());
-        self.enc = Some(EncState::new(
-            &self.args,
-            output.refresh,
-            output.size_pixels,
-            (x, y),
-            (w, h),
-            Arc::clone(&self.sigusr1_flag),
-        ));
+        self.enc = Some(
+            match EncState::new(
+                &self.args,
+                output.refresh,
+                output.size_pixels,
+                (x, y),
+                (w, h),
+                Arc::clone(&self.sigusr1_flag),
+            ) {
+                Ok(enc) => enc,
+                Err(e) => {
+                    println!("failed to create encoder: {}", e);
+                    self.quit_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            },
+        );
         self.queue_copy(qhandle);
     }
 }
@@ -858,8 +868,19 @@ impl EncState {
         (encode_x, encode_y): (i32, i32),
         (encode_w, encode_h): (i32, i32),
         sigusr1_flag: Arc<AtomicBool>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
+
+        if unsafe {
+            avformat_query_codec(
+                octx.format().as_ptr(),
+                codec::Id::H264.into(),
+                FF_COMPLIANCE_STRICT,
+            )
+        } != 1
+        {
+            bail!("Format {} does not support AVC codec", octx.format().name());
+        }
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
@@ -948,7 +969,7 @@ impl EncState {
             None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
 
-        EncState {
+        Ok(EncState {
             filter,
             enc,
             filter_output_timebase: filter_timebase,
@@ -960,7 +981,7 @@ impl EncState {
             verbose: args.verbose,
             history_state,
             sigusr1_flag,
-        }
+        })
     }
     fn process_ready(&mut self) {
         // if we were recording history and got the SIGUSR1 flag
