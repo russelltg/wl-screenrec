@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::bail;
+use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec::{self},
@@ -25,7 +25,7 @@ use ffmpeg::{
     filter,
     format::{self, Pixel},
     frame::{self, video},
-    Packet, Rational,
+    media, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGINT, SIGUSR1};
@@ -68,13 +68,13 @@ use avhw::{AvHwDevCtx, AvHwFrameCtx};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse, help="don't use the GPU encoder, download the frames onto the CPU and use x264")]
+    #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse, help="don't use the GPU encoder, download the frames onto the CPU and use a software encoder. Ignored if `encoder` is supplied")]
     hw: bool,
 
     #[clap(
         long,
         short,
-        default_value = "screenrecord.avi",
+        default_value = "screenrecord.mp4",
         help = "filename to write to. container type is detected from extension"
     )]
     filename: String,
@@ -99,6 +99,21 @@ struct Args {
     #[clap(long, value_enum, default_value_t)]
     low_power: LowPowerMode,
 
+    #[clap(
+        long,
+        value_enum,
+        default_value_t,
+        help = "which codec to use. Used in conjunction with --no-hw to determinte which enocder to use. Ignored if `encoder` is supplied"
+    )]
+    codec: Codec,
+
+    #[clap(
+        long,
+        value_enum,
+        help = "Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be"
+    )]
+    ffmpeg_encoder: Option<String>,
+
     #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps")]
     bitrate: Size,
 
@@ -107,6 +122,16 @@ struct Args {
         value_parser=parse_duration
     )]
     history: Option<Duration>,
+}
+
+#[derive(clap::ValueEnum, Debug, Clone, Default)]
+enum Codec {
+    #[default]
+    Auto,
+    Avc,
+    Hevc,
+    VP8,
+    VP9,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -816,18 +841,26 @@ struct EncState {
     sigusr1_flag: Arc<AtomicBool>,
 }
 
+fn vaapi_codec_id(codec: codec::Id) -> Option<&'static str> {
+    match codec {
+        codec::Id::H264 => Some("h264_vaapi"),
+        codec::Id::H265 | codec::Id::HEVC => Some("hevc_vaapi"),
+        codec::Id::VP8 => Some("vp8_vaapi"),
+        codec::Id::VP9 => Some("vp9_vaapi"),
+        _ => None,
+    }
+}
+
 fn make_video_params(
     args: &Args,
-    encode_w: i32,
-    encode_h: i32,
+    pix_fmt: Pixel,
+    codec: &ffmpeg::Codec,
+    (encode_w, encode_h): (i32, i32),
     framerate: Rational,
     global_header: bool,
     hw_device_ctx: &mut AvHwDevCtx,
     frames_yuv: &mut AvHwFrameCtx,
-) -> encoder::video::Video {
-    let codec =
-        ffmpeg_next::encoder::find_by_name(if args.hw { "h264_vaapi" } else { "libx264" }).unwrap();
-
+) -> anyhow::Result<encoder::video::Video> {
     let mut enc =
         unsafe { codec::context::Context::wrap(avcodec_alloc_context3(codec.as_ptr()), None) }
             .encoder()
@@ -844,19 +877,16 @@ fn make_video_params(
         enc.set_flags(codec::Flags::GLOBAL_HEADER);
     }
 
-    if args.hw {
-        enc.set_format(Pixel::VAAPI);
-
+    enc.set_format(pix_fmt);
+    if pix_fmt == Pixel::VAAPI {
         unsafe {
             (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.as_mut_ptr());
             (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.as_mut_ptr());
             (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
         }
-    } else {
-        enc.set_format(Pixel::NV12);
     }
 
-    enc
+    Ok(enc)
 }
 
 impl EncState {
@@ -871,15 +901,77 @@ impl EncState {
     ) -> anyhow::Result<Self> {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
+        let codec = if let Some(encoder) = &args.ffmpeg_encoder {
+            ffmpeg_next::encoder::find_by_name(&encoder).ok_or_else(|| {
+                format_err!(
+                    "Encoder {encoder} specified with --ffmpeg-encoder could not be instntiated"
+                )
+            })?
+        } else {
+            let codec_id = match args.codec {
+                Codec::Auto => octx.format().codec(&args.filename, media::Type::Video),
+                Codec::Avc => codec::Id::H264,
+                Codec::Hevc => codec::Id::HEVC,
+                Codec::VP8 => codec::Id::VP8,
+                Codec::VP9 => codec::Id::VP9,
+            };
+
+            let maybe_hw_codec = if args.hw {
+                if let Some(hw_codec_name) = vaapi_codec_id(codec_id) {
+                    if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
+                        Some(codec)
+                    } else {
+                        println!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
+                        None
+                    }
+                } else {
+                    println!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
+                    None
+                }
+            } else {
+                None
+            };
+
+            match maybe_hw_codec {
+                Some(codec) => codec,
+                None => match ffmpeg_next::encoder::find(codec_id) {
+                    Some(codec) => codec,
+                    None => {
+                        bail!("Failed to get any encoder for codec {codec_id:?}");
+                    }
+                },
+            }
+        };
+
+        let codec_id = codec.id();
+
+        let supported_formats = supported_formats(&codec);
+        if supported_formats.is_empty() {
+            bail!(
+                "Encoder {} does not support any pixel formats?",
+                codec.name()
+            );
+        }
+
+        let pix_fmt = if supported_formats.contains(&Pixel::VAAPI) {
+            Pixel::VAAPI
+        } else {
+            supported_formats[0]
+        };
+
         if unsafe {
             avformat_query_codec(
                 octx.format().as_ptr(),
-                codec::Id::H264.into(),
+                codec_id.into(),
                 FF_COMPLIANCE_STRICT,
             )
         } != 1
         {
-            bail!("Format {} does not support AVC codec", octx.format().name());
+            bail!(
+                "Format {} does not support {:?} codec",
+                octx.format().name(),
+                codec_id
+            );
         }
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
@@ -891,7 +983,7 @@ impl EncState {
 
         let (filter, filter_timebase) = filter(
             &mut frames_rgb,
-            args.hw,
+            pix_fmt,
             (capture_w, capture_h),
             (encode_x, encode_y),
             (encode_w, encode_h),
@@ -907,20 +999,26 @@ impl EncState {
 
         let enc = make_video_params(
             args,
-            encode_w,
-            encode_h,
+            pix_fmt,
+            &codec,
+            (encode_w, encode_h),
             refresh,
             global_header,
             &mut hw_device_ctx,
             &mut frames_yuv,
-        );
+        )?;
 
         let enc = if args.hw {
             let low_power_opts = dict! {
                 "low_power" => "1"
             };
-            let regular_opts = dict! {
-                "level" => "30"
+
+            let regular_opts = if codec_id == codec::Id::H264 {
+                dict! {
+                    "level" => "30"
+                }
+            } else {
+                dict! {}
             };
 
             match args.low_power {
@@ -930,13 +1028,14 @@ impl EncState {
                         println!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder", e);
                         make_video_params(
                             args,
-                            encode_w,
-                            encode_h,
+                            pix_fmt,
+                            &codec,
+                            (encode_w, encode_h),
                             refresh,
                             global_header,
                             &mut hw_device_ctx,
                             &mut frames_yuv,
-                        )
+                        )?
                         .open_with(regular_opts)
                         .unwrap()
                     }
@@ -951,9 +1050,7 @@ impl EncState {
             .unwrap()
         };
 
-        let mut ost = octx
-            .add_stream(ffmpeg_next::encoder::find(codec::Id::H264))
-            .unwrap();
+        let mut ost = octx.add_stream(codec).unwrap();
 
         let vid_stream_idx = ost.index();
         ost.set_parameters(&enc);
@@ -983,6 +1080,7 @@ impl EncState {
             sigusr1_flag,
         })
     }
+
     fn process_ready(&mut self) {
         // if we were recording history and got the SIGUSR1 flag
         if let (HistoryState::RecordingHistory(_, hist), true) = (
@@ -1084,7 +1182,7 @@ impl EncState {
 
 fn filter(
     inctx: &mut AvHwFrameCtx,
-    hw: bool,
+    pix_fmt: Pixel,
     (capture_width, capture_height): (i32, i32),
     (enc_x, enc_y): (i32, i32),
     (enc_width, enc_height): (i32, i32),
@@ -1120,11 +1218,8 @@ fn filter(
         .unwrap();
 
     let mut out = g.get("out").unwrap();
-    if hw {
-        out.set_pixel_format(Pixel::VAAPI);
-    } else {
-        out.set_pixel_format(Pixel::NV12);
-    }
+
+    out.set_pixel_format(pix_fmt);
 
     g.output("in", 0)
         .unwrap()
@@ -1138,13 +1233,31 @@ fn filter(
             enc_y,
             enc_width,
             enc_height,
-            if hw { "" } else { ", hwdownload" },
+            if pix_fmt == Pixel::VAAPI {
+                ""
+            } else {
+                ", hwdownload"
+            },
         ))
         .unwrap();
 
     g.validate().unwrap();
 
     (g, Rational::new(1, 1_000_000_000))
+}
+
+fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
+    unsafe {
+        let mut frmts = Vec::new();
+        let mut fmt_ptr = (*codec.as_ptr()).pix_fmts;
+        while !fmt_ptr.is_null() && *fmt_ptr as c_int != -1
+        /*AV_PIX_FMT_NONE */
+        {
+            frmts.push(Pixel::from(*fmt_ptr));
+            fmt_ptr = fmt_ptr.add(1);
+        }
+        frmts
+    }
 }
 
 fn main() {
