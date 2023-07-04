@@ -1,18 +1,22 @@
 # wl-screenrec
 
-High performance screen recorder for Wayland. Requres a wayland compositor supporting
-[`wlr-output-management-unstable-v1`](https://wayland.app/protocols/wlr-output-management-unstable-v1) 
-and [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) protocols, 
-like [sway](https://swaywm.org/) and [Hyprland](https://hyprland.org/). 
+High performance screen recorder for wlroots Wayland. 
 
 Uses dma-buf transfers to get surface, and uses the GPU to do both the pixel format conversion and the encoding,
 meaning the raw video data never touches the CPU, leaving it free to run your applications.
 
-Should work well on Intel and AMD GPUs. It also might work on desktop Nvidia GPUs with `libva-vdpau-driver`, 
-but it seems like vaapi doesn't work on laptop Nvidia GPUs. However, many of these systems have Intel GPUs as well,
-which work great.
-
 Open an issue if something is not working, I'm happy to take a look.
+
+# System Requirements
+
+* wayland compositor supporting the following unstable protocols:
+  * [`wlr-output-management-unstable-v1`](https://wayland.app/protocols/wlr-output-management-unstable-v1) 
+  * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1), 
+
+   [Sway](https://swaywm.org/), [Hyprland](https://hyprland.org/), and [wayfire](https://wayfire.org/) all meet this criteria.
+* [`vaapi`](https://01.org/temp-linuxgraphics/community/vaapi) encode support, consult your distribution for how to set this up. Known good configurations:
+  * Intel iGPUs
+  * Radeon GPUs
 
 # Performance
 
