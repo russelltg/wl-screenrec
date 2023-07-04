@@ -267,6 +267,7 @@ impl PartialOutputInfo {
     }
 }
 
+#[derive(Clone)]
 struct OutputInfo {
     name: String,
     loc: (i32, i32),
@@ -294,7 +295,7 @@ struct State {
     dma: ZwpLinuxDmabufV1,
     screencopy_manager: ZwlrScreencopyManagerV1,
     wl_output: Option<WlOutput>,
-    enc: Option<EncState>,
+    enc: EncConstructionStage,
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
@@ -303,6 +304,32 @@ struct State {
     outputs: BTreeMap<u32, OutputInfo>,
     quit_flag: Arc<AtomicBool>,
     sigusr1_flag: Arc<AtomicBool>,
+}
+
+enum EncConstructionStage {
+    None,
+    EverythingButFormat {
+        output: OutputInfo,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
+    Complete(EncState),
+}
+impl EncConstructionStage {
+    #[track_caller]
+    fn unwrap(&mut self) -> &mut EncState {
+        if let EncConstructionStage::Complete(enc) = self {
+            enc
+        } else {
+            panic!("unwrap on non-complete EncConstructionStage")
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        matches!(self, EncConstructionStage::Complete(_))
+    }
 }
 
 enum HistoryState {
@@ -334,10 +361,18 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for State {
     }
 }
 
+fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> AVPixelFormat {
+    match dmabuf {
+        drm_fourcc::DrmFourcc::Xrgb8888 => AVPixelFormat::AV_PIX_FMT_BGR0,
+        drm_fourcc::DrmFourcc::Xrgb2101010 => AVPixelFormat::AV_PIX_FMT_X2RGB10LE,
+        f => unimplemented!("fourcc {f:?}"),
+    }
+}
+
 impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
     fn event(
         state: &mut Self,
-        _proxy: &ZwlrScreencopyFrameV1,
+        capture: &ZwlrScreencopyFrameV1,
         event: <ZwlrScreencopyFrameV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
@@ -373,12 +408,85 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
                 }
 
-                state.enc.as_mut().unwrap().push(surf);
+                state.enc.unwrap().push(surf);
 
                 state.queue_copy(qhandle);
             }
             zwlr_screencopy_frame_v1::Event::BufferDone => {}
-            zwlr_screencopy_frame_v1::Event::LinuxDmabuf { .. } => {}
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => {
+                match &state.enc {
+                    EncConstructionStage::None => unreachable!(
+                        "Oops, somehow created a screencopy frame without initial enc state stuff?"
+                    ),
+                    EncConstructionStage::EverythingButFormat { output, x, y, w, h } => {
+                        state.enc = EncConstructionStage::Complete(
+                            match EncState::new(
+                                &state.args,
+                                dmabuf_to_av(
+                                    drm_fourcc::DrmFourcc::try_from(format)
+                                        .expect("Unknown fourcc"),
+                                ),
+                                output.refresh,
+                                output.size_pixels,
+                                (*x, *y),
+                                (*w, *h),
+                                Arc::clone(&state.sigusr1_flag),
+                            ) {
+                                Ok(enc) => enc,
+                                Err(e) => {
+                                    println!("failed to create encoder: {}", e);
+                                    state.quit_flag.store(true, Ordering::SeqCst);
+                                    return;
+                                }
+                            },
+                        );
+                    }
+                    EncConstructionStage::Complete(_) => {}
+                }
+
+                let enc = state.enc.unwrap();
+
+                let surf = enc.frames_rgb.alloc().unwrap();
+
+                let (desc, mapping) = map_drm(&surf);
+
+                let modifier = desc.objects[0].format_modifier.to_be_bytes();
+                let stride = desc.layers[0].planes[0].pitch as u32;
+                let fd = desc.objects[0].fd;
+
+                let dma_params = state.dma.create_params(qhandle, ());
+                dma_params.add(
+                    fd,
+                    0,
+                    0,
+                    stride,
+                    u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+                    u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+                );
+
+                let buf = dma_params.create_immed(
+                    width as i32,
+                    height as i32,
+                    format,
+                    zwp_linux_buffer_params_v1::Flags::empty(),
+                    qhandle,
+                    (),
+                );
+
+                capture.copy_with_damage(&buf);
+
+                state.surfaces_owned_by_compositor.push_back((
+                    surf,
+                    mapping,
+                    dma_params,
+                    capture.clone(),
+                    buf,
+                ));
+            }
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
@@ -386,7 +494,6 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 println!("Failed to screencopy!");
                 state.quit_flag.store(true, Ordering::SeqCst)
             }
-
             _ => {}
         }
     }
@@ -604,7 +711,7 @@ impl State {
                 ZwlrOutputManagerV1::interface().version..=ZwlrOutputManagerV1::interface().version,
                 (),
             )
-            .unwrap();
+            .expect("Your compositor does not seem to support the wlr-output-manager protocol. wl-screenrec requires a wlroots based compositor like sway or Hyprland");
 
         let mut partial_outputs = BTreeMap::new();
         for g in gm.contents().clone_list() {
@@ -634,7 +741,7 @@ impl State {
                 surfaces_owned_by_compositor: VecDeque::new(),
                 dma,
                 screencopy_manager: man,
-                enc: None,
+                enc: EncConstructionStage::None,
                 starting_timestamp: None,
                 fps_counter: FpsCounter::new(),
                 args,
@@ -650,43 +757,10 @@ impl State {
     }
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
-        let enc = self.enc.as_mut().unwrap();
-        let surf = enc.frames_rgb.alloc().unwrap();
-
-        let (desc, mapping) = map_drm(&surf);
-
-        let modifier = desc.objects[0].format_modifier.to_be_bytes();
-        let stride = desc.layers[0].planes[0].pitch as u32;
-        let fd = desc.objects[0].fd;
-
-        let dma_params = self.dma.create_params(eq, ());
-        dma_params.add(
-            fd,
-            0,
-            0,
-            stride,
-            u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-            u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-        );
-
-        let (w, h) = enc.capture_size;
-        let buf = dma_params.create_immed(
-            w,
-            h,
-            drm_fourcc::DrmFourcc::Xrgb8888 as u32,
-            zwp_linux_buffer_params_v1::Flags::empty(),
-            eq,
-            (),
-        );
-
-        let capture =
+        // creating this triggers the linux_dmabuf event, which is where we allocate etc
+        let _capture =
             self.screencopy_manager
                 .capture_output(1, self.wl_output.as_ref().unwrap(), eq, ());
-
-        capture.copy_with_damage(&buf);
-
-        self.surfaces_owned_by_compositor
-            .push_back((surf, mapping, dma_params, capture, buf));
     }
 
     fn update_output_info_wl_output(
@@ -740,7 +814,7 @@ impl State {
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
-        assert!(self.enc.is_none());
+        assert!(!self.enc.is_complete());
 
         if self.outputs.len() != self.partial_outputs.len() {
             // probe not complete
@@ -806,23 +880,13 @@ impl State {
         println!("Using output {}", output.name);
 
         self.wl_output = Some(output.output.clone());
-        self.enc = Some(
-            match EncState::new(
-                &self.args,
-                output.refresh,
-                output.size_pixels,
-                (x, y),
-                (w, h),
-                Arc::clone(&self.sigusr1_flag),
-            ) {
-                Ok(enc) => enc,
-                Err(e) => {
-                    println!("failed to create encoder: {}", e);
-                    self.quit_flag.store(true, Ordering::SeqCst);
-                    return;
-                }
-            },
-        );
+        self.enc = EncConstructionStage::EverythingButFormat {
+            output: output.clone(),
+            x,
+            y,
+            w,
+            h,
+        };
         self.queue_copy(qhandle);
     }
 }
@@ -893,6 +957,7 @@ impl EncState {
     // assumed that capture_{w,h}
     fn new(
         args: &Args,
+        pixel_format: AVPixelFormat,
         refresh: Rational,
         (capture_w, capture_h): (i32, i32), // pixels
         (encode_x, encode_y): (i32, i32),
@@ -978,7 +1043,7 @@ impl EncState {
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_BGR0, capture_w, capture_h)
+            .create_frame_ctx(pixel_format, capture_w, capture_h)
             .unwrap();
 
         let (filter, filter_timebase) = filter(
@@ -1283,7 +1348,7 @@ fn main() {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
-    if let Some(enc) = &mut state.enc {
+    if let EncConstructionStage::Complete(enc) = &mut state.enc {
         enc.flush();
     }
 }
