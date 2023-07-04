@@ -107,7 +107,7 @@ killall -USR1 wl-screenrec  # flush the most recent 10 seconds onto the file, an
 
 # All options
 
-```bash
+```text
 $ wl-screenrec --help
 Usage: wl-screenrec [OPTIONS]
 
