@@ -15,7 +15,7 @@ use std::{
 use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
-    codec::{self},
+    codec,
     dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
@@ -899,7 +899,6 @@ struct EncState {
     filter_output_timebase: Rational,
     octx_time_base: Rational,
     vid_stream_idx: usize,
-    capture_size: (i32, i32),
     verbose: bool,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
@@ -967,7 +966,7 @@ impl EncState {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
         let codec = if let Some(encoder) = &args.ffmpeg_encoder {
-            ffmpeg_next::encoder::find_by_name(&encoder).ok_or_else(|| {
+            ffmpeg_next::encoder::find_by_name(encoder).ok_or_else(|| {
                 format_err!(
                     "Encoder {encoder} specified with --ffmpeg-encoder could not be instntiated"
                 )
@@ -1139,7 +1138,6 @@ impl EncState {
             octx,
             vid_stream_idx,
             frames_rgb,
-            capture_size: (capture_w, capture_h),
             verbose: args.verbose,
             history_state,
             sigusr1_flag,
