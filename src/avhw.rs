@@ -4,7 +4,7 @@ use ffmpeg::{
     dict,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext, AVPixelFormat,
+        av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext,
     },
     format::Pixel,
     frame,
@@ -39,7 +39,7 @@ impl AvHwDevCtx {
 
     pub fn create_frame_ctx(
         &mut self,
-        pixfmt: AVPixelFormat,
+        pixfmt: Pixel,
         width: i32,
         height: i32,
     ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
@@ -49,7 +49,7 @@ impl AvHwDevCtx {
 
             // ffmpeg does not expose RGB vaapi
             (*hwframe_casted).format = Pixel::VAAPI.into();
-            (*hwframe_casted).sw_format = pixfmt;
+            (*hwframe_casted).sw_format = pixfmt.into();
             (*hwframe_casted).width = width;
             (*hwframe_casted).height = height;
             (*hwframe_casted).initial_pool_size = 5;

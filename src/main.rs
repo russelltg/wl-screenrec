@@ -2,8 +2,9 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{BTreeMap, VecDeque},
-    ffi::c_int,
+    ffi::{c_int, CStr},
     num::ParseIntError,
+    str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
@@ -15,12 +16,11 @@ use std::{
 use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
-    codec,
-    dict, encoder,
+    codec, dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_hwframe_map, avcodec_alloc_context3, avformat_query_codec, AVDRMFrameDescriptor,
-        AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
+        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec,
+        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
@@ -113,6 +113,12 @@ struct Args {
         help = "Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be"
     )]
     ffmpeg_encoder: Option<String>,
+
+    #[clap(
+        long,
+        help = "which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10"
+    )]
+    encode_pixfmt: Option<Pixel>,
 
     #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps")]
     bitrate: Size,
@@ -361,10 +367,10 @@ impl Dispatch<ZwpLinuxDmabufV1, ()> for State {
     }
 }
 
-fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> AVPixelFormat {
+fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> Pixel {
     match dmabuf {
-        drm_fourcc::DrmFourcc::Xrgb8888 => AVPixelFormat::AV_PIX_FMT_BGR0,
-        drm_fourcc::DrmFourcc::Xrgb2101010 => AVPixelFormat::AV_PIX_FMT_X2RGB10LE,
+        drm_fourcc::DrmFourcc::Xrgb8888 => Pixel::BGRZ,
+        drm_fourcc::DrmFourcc::Xrgb2101010 => Pixel::X2RGB10LE,
         f => unimplemented!("fourcc {f:?}"),
     }
 }
@@ -904,6 +910,12 @@ struct EncState {
     sigusr1_flag: Arc<AtomicBool>,
 }
 
+#[derive(Copy, Clone)]
+enum EncodePixelFormat {
+    Vaapi(Pixel),
+    Sw(Pixel),
+}
+
 fn vaapi_codec_id(codec: codec::Id) -> Option<&'static str> {
     match codec {
         codec::Id::H264 => Some("h264_vaapi"),
@@ -916,7 +928,7 @@ fn vaapi_codec_id(codec: codec::Id) -> Option<&'static str> {
 
 fn make_video_params(
     args: &Args,
-    pix_fmt: Pixel,
+    enc_pix_fmt: EncodePixelFormat,
     codec: &ffmpeg::Codec,
     (encode_w, encode_h): (i32, i32),
     framerate: Rational,
@@ -940,12 +952,16 @@ fn make_video_params(
         enc.set_flags(codec::Flags::GLOBAL_HEADER);
     }
 
-    enc.set_format(pix_fmt);
-    if pix_fmt == Pixel::VAAPI {
+    enc.set_format(match enc_pix_fmt {
+        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+        EncodePixelFormat::Sw(sw) => sw,
+    });
+
+    if let EncodePixelFormat::Vaapi(sw_pix_fmt) = enc_pix_fmt {
         unsafe {
             (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.as_mut_ptr());
             (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.as_mut_ptr());
-            (*enc.as_mut_ptr()).sw_pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+            (*enc.as_mut_ptr()).sw_pix_fmt = sw_pix_fmt.into();
         }
     }
 
@@ -956,7 +972,7 @@ impl EncState {
     // assumed that capture_{w,h}
     fn new(
         args: &Args,
-        pixel_format: AVPixelFormat,
+        capture_pixfmt: Pixel,
         refresh: Rational,
         (capture_w, capture_h): (i32, i32), // pixels
         (encode_x, encode_y): (i32, i32),
@@ -1017,10 +1033,14 @@ impl EncState {
             );
         }
 
-        let pix_fmt = if supported_formats.contains(&Pixel::VAAPI) {
-            Pixel::VAAPI
+        let enc_pixfmt = if supported_formats.contains(&Pixel::VAAPI) {
+            EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
         } else {
-            supported_formats[0]
+            match args.encode_pixfmt {
+                None => EncodePixelFormat::Sw(supported_formats[0]),
+                Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
+                Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
+            }
         };
 
         if unsafe {
@@ -1042,19 +1062,26 @@ impl EncState {
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(pixel_format, capture_w, capture_h)
+            .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .unwrap();
 
         let (filter, filter_timebase) = filter(
             &mut frames_rgb,
-            pix_fmt,
+            enc_pixfmt,
             (capture_w, capture_h),
             (encode_x, encode_y),
             (encode_w, encode_h),
         );
 
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(AVPixelFormat::AV_PIX_FMT_NV12, encode_w, encode_h)
+            .create_frame_ctx(
+                match enc_pixfmt {
+                    EncodePixelFormat::Vaapi(fmt) => fmt,
+                    EncodePixelFormat::Sw(fmt) => fmt,
+                },
+                encode_w,
+                encode_h,
+            )
             .unwrap();
 
         if args.verbose {
@@ -1063,7 +1090,7 @@ impl EncState {
 
         let enc = make_video_params(
             args,
-            pix_fmt,
+            enc_pixfmt,
             &codec,
             (encode_w, encode_h),
             refresh,
@@ -1092,7 +1119,7 @@ impl EncState {
                         println!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder", e);
                         make_video_params(
                             args,
-                            pix_fmt,
+                            enc_pixfmt,
                             &codec,
                             (encode_w, encode_h),
                             refresh,
@@ -1245,7 +1272,7 @@ impl EncState {
 
 fn filter(
     inctx: &mut AvHwFrameCtx,
-    pix_fmt: Pixel,
+    pix_fmt: EncodePixelFormat,
     (capture_width, capture_height): (i32, i32),
     (enc_x, enc_y): (i32, i32),
     (enc_width, enc_height): (i32, i32),
@@ -1282,21 +1309,38 @@ fn filter(
 
     let mut out = g.get("out").unwrap();
 
-    out.set_pixel_format(pix_fmt);
+    out.set_pixel_format(match pix_fmt {
+        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+        EncodePixelFormat::Sw(sw) => sw,
+    });
+
+    let output_real_pixfmt_name = unsafe {
+        from_utf8_unchecked(
+            CStr::from_ptr(av_get_pix_fmt_name(
+                match pix_fmt {
+                    EncodePixelFormat::Vaapi(fmt) => fmt,
+                    EncodePixelFormat::Sw(fmt) => fmt,
+                }
+                .into(),
+            ))
+            .to_bytes(),
+        )
+    };
 
     g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={}:{}:{}:{},scale_vaapi=format=nv12:w={}:h={}{}",
+            "crop={}:{}:{}:{},scale_vaapi=format={}:w={}:h={}{}",
             enc_width,
             enc_height,
             enc_x,
             enc_y,
+            output_real_pixfmt_name,
             enc_width,
             enc_height,
-            if pix_fmt == Pixel::VAAPI {
+            if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
                 ", hwdownload"

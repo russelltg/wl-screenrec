@@ -87,11 +87,59 @@ wl-screenrec -g "$(slurp)"    # use slurp
 wl-screenrec -g "0,0 128x128" # manual region
 ```
 
+Capture 444 video (no pixel format compression):
+
+> NOTE: Look at `vainfo -a` to see your supported pixel formats. Support is very 
+> hardware-dependent. For example, on my machine only HEVC suports 444 formats, and
+> all of 8-bit RGB formats didn't work for whatever reason.
+
+```bash
+wl-screenrec --codec hevc --encode-pixfmt vuyx   # 8-bit 444
+wl-screenrec --codec hevc --encode-pixfmt xrgb10 # 10-bit 444
+```
+
 Record with history
 ```bash
 wl-screenrec --history 10 & # record the most recent 10 seconds into memory, not writing into the file
 # ... some important event occurs
 killall -USR1 wl-screenrec  # flush the most recent 10 seconds onto the file, and start appending to the file like recording normally
+```
+
+# All options
+
+```bash
+$ wl-screenrec --help
+Usage: wl-screenrec [OPTIONS]
+
+Options:
+      --no-hw
+          don't use the GPU encoder, download the frames onto the CPU and use a software encoder. Ignored if `encoder` is supplied
+  -f, --filename <FILENAME>
+          filename to write to. container type is detected from extension [default: screenrecord.mp4]
+  -g, --geometry <GEOMETRY>
+          geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output
+  -o, --output <OUTPUT>
+          Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
+  -v, --verbose
+          add very loud logging
+      --dri-device <DRI_DEVICE>
+          [default: /dev/dri/renderD128]
+      --low-power <LOW_POWER>
+          [default: auto] [possible values: auto, on, off]
+      --codec <CODEC>
+          which codec to use. Used in conjunction with --no-hw to determinte which enocder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9]
+      --ffmpeg-encoder <FFMPEG_ENCODER>
+          Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be
+      --encode-pixfmt <ENCODE_PIXFMT>
+          which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10
+  -b, --bitrate <BITRATE>
+          bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps [default: "5 MB"]
+      --history <HISTORY>
+          run in a mode where the screen is recorded, but nothing is written to the output file until SIGUSR1 is sent to the process. Then, it writes the most recent N seconds to a file and continues recording
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 # Known issues
