@@ -4,12 +4,11 @@ use std::{
     cmp::max,
     collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
-    mem::{MaybeUninit},
     num::ParseIntError,
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{channel, Receiver, Sender},
+        mpsc::{channel, Receiver, Sender, SendError},
         Arc,
     },
     thread::{sleep, spawn},
@@ -20,14 +19,12 @@ use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec,
-    codec::{Context},
-    decoder,
-    dict, encoder,
+    codec::Context,
+    decoder, dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_channel_layout_from_mask, av_find_input_format, av_free,
-        av_get_default_channel_layout, av_get_pix_fmt_name, av_hwframe_map,
-        avcodec_alloc_context3, avformat_query_codec, AVChannelLayout, AVChannelOrder,
+        av_find_input_format, av_free, av_get_default_channel_layout, av_get_pix_fmt_name,
+        av_hwframe_map, avcodec_alloc_context3, avformat_query_codec, AVChannelOrder,
         AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
@@ -87,8 +84,7 @@ const AUDIO_DEVICE_HELP: &'static str =
     "which audio device to record from. list devices with `arecord -l`";
 
 #[cfg(target_os = "freebsd")]
-const AUDIO_DEVICE_HELP: &str =
-    "which audio device to record from. list devices with `ossinfo -a`";
+const AUDIO_DEVICE_HELP: &str = "which audio device to record from. list devices with `ossinfo -a`";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -939,7 +935,6 @@ struct EncState {
     verbose: bool,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
-    capture_size: (i32, i32),
     audio_receiver: Option<Receiver<Packet>>,
 }
 
@@ -1011,26 +1006,31 @@ impl AudioState {
                             frame_into_encoder.set_pts(Some(pts));
                             pts += frame_into_encoder.samples() as i64;
                             self.enc_audio.send_frame(&frame_into_encoder).unwrap();
-                            self.pop_frames_from_encoder();
+                            if self.pop_frames_from_encoder().is_err() {
+                                return;
+                            }
                         }
                     } else {
                         self.enc_audio.send_frame(&frame).unwrap();
-                        self.pop_frames_from_encoder();
+                        if self.pop_frames_from_encoder().is_err() {
+                            return;
+                        }
                     }
                 }
             }
         }
     }
 
-    fn pop_frames_from_encoder(&mut self) {
+    fn pop_frames_from_encoder(&mut self) -> Result<(), SendError<Packet>> {
         let mut pack = Packet::empty();
         while self.enc_audio.receive_packet(&mut pack).is_ok() {
             pack.set_stream(self.ost_audio_idx);
             pack.rescale_ts(self.dec_audio.time_base(), self.ost_audio_time_base);
-            self.frame_sender.send(pack);
+            self.frame_sender.send(pack)?;
 
             pack = Packet::empty();
         }
+        Ok(())
     }
 
     fn create_stream(args: &Args, octx: &mut format::context::Output) -> IncompleteAudioState {
@@ -1423,7 +1423,6 @@ impl EncState {
             verbose: args.verbose,
             history_state,
             sigusr1_flag,
-            capture_size: (capture_w, capture_h),
             audio_receiver,
         })
     }
@@ -1676,36 +1675,6 @@ fn audio_filter(
 
     g
 }
-
-fn avchannelformat_from_bits(bits: u64) -> AVChannelLayout {
-    unsafe {
-        let mut fmt = MaybeUninit::uninit();
-        let res = av_channel_layout_from_mask(fmt.as_mut_ptr(), bits);
-        assert_eq!(res, 0);
-        fmt.assume_init()
-    }
-}
-
-// fn avchannelformat_to_string(fmt: AVChannelLayout) -> String {
-//     unsafe {
-//         let mut buf = Vec::<u8>::new();
-//         let bytes_filled = 0;
-//         buf.resize(128, 0);
-
-//         for chan in 0..fmt.nb_channels {
-//             let c = av_channel_layout_channel_from_index(&fmt, chan as u32);
-//             av_channel_name(buf.as_mut_ptr()., buf_size, channel))
-
-//         }
-
-//         // let size = av_channel_layout_describe(&fmt, buf.as_mut_ptr() as *mut i8, buf.len());
-//         // assert!(size > 0);
-//         // assert!((size as usize) < buf.len());
-//         // buf.resize(size as usize - 1, 0); // remove trailing \0
-
-//         String::from_utf8(buf).unwrap()
-//     }
-// }
 
 fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
     unsafe {
