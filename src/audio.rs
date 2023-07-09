@@ -1,7 +1,12 @@
 use std::{
     cmp::max,
     ffi::{c_int, CString},
-    sync::mpsc::{channel, Receiver, SendError, Sender},
+    ops::ControlFlow,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{channel, Receiver, RecvError, SendError, Sender, TryRecvError},
+        Arc,
+    },
     thread::spawn,
 };
 
@@ -18,7 +23,7 @@ use ffmpeg::{
 
 use crate::{fifo::AudioFifo, Args};
 
-pub struct AudioState {
+struct AudioState {
     // fifo: Option<AudioFifo>,
     enc_audio: encoder::Audio,
     // audio_input: Input,
@@ -31,6 +36,16 @@ pub struct AudioState {
 
     ost_audio_idx: usize,
     ost_audio_time_base: Rational,
+
+    flush_flag: Arc<AtomicBool>,
+    fifo: Option<AudioFifo>,
+
+    pts: i64,
+}
+
+pub struct AudioHandle {
+    rec: Receiver<Packet>,
+    flush_flag: Arc<AtomicBool>,
 }
 
 pub struct IncompleteAudioState {
@@ -43,77 +58,105 @@ pub struct IncompleteAudioState {
 }
 
 impl AudioState {
-    fn thread(mut self, mut audio_input: Input, mut fifo: Option<AudioFifo>) {
+    fn thread(mut self, mut audio_input: Input) {
         assert_ne!(self.ost_audio_time_base, Rational::new(0, 0));
-
-        let mut frame = frame::Audio::empty();
-        let mut frame_into_encoder = frame::Audio::new(
-            self.enc_audio.format(),
-            self.enc_audio.frame_size() as usize,
-            self.enc_audio.channel_layout(),
-        );
-
-        let mut pts = 0;
 
         for (stream, mut packet) in audio_input.packets() {
             if stream.index() == self.ist_stream_idx {
                 packet.rescale_ts(self.audio_stream_time_base, self.dec_audio.time_base());
                 self.dec_audio.send_packet(&packet).unwrap();
+                self.pop_from_decoder();
+                self.pop_from_filter();
+            }
 
-                while self.dec_audio.receive_frame(&mut frame).is_ok() {
-                    self.audio_filter
-                        .get("in")
-                        .unwrap()
-                        .source()
-                        .add(&frame)
-                        .unwrap();
-                }
-
-                let mut filtered_frame = frame::Audio::empty();
-                while self
-                    .audio_filter
-                    .get("out")
-                    .unwrap()
-                    .sink()
-                    .frame(&mut filtered_frame)
-                    .is_ok()
-                {
-                    if let Some(fifo) = &mut fifo {
-                        fifo.push(&filtered_frame);
-                        while fifo.size() > self.enc_audio.frame_size() as usize {
-                            fifo.pop(&mut frame_into_encoder);
-                            frame_into_encoder.set_rate(frame.rate());
-                            frame_into_encoder.set_pts(Some(pts));
-                            pts += frame_into_encoder.samples() as i64;
-                            self.enc_audio.send_frame(&frame_into_encoder).unwrap();
-                            if self.pop_frames_from_encoder().is_err() {
-                                return;
-                            }
-                        }
-                    } else {
-                        self.enc_audio.send_frame(&frame).unwrap();
-                        if self.pop_frames_from_encoder().is_err() {
-                            return;
-                        }
-                    }
-                }
+            if self.flush_flag.load(Ordering::SeqCst) {
+                self.flush();
+                return;
             }
         }
     }
 
-    fn pop_frames_from_encoder(&mut self) -> Result<(), SendError<Packet>> {
+    fn pop_from_filter(&mut self) {
+        let mut filtered_frame = frame::Audio::empty();
+        while self
+            .audio_filter
+            .get("out")
+            .unwrap()
+            .sink()
+            .frame(&mut filtered_frame)
+            .is_ok()
+        {
+            if self.fifo.is_some() {
+                self.fifo().unwrap().push(&filtered_frame);
+                while self.fifo().unwrap().size() > self.enc_audio.frame_size() as usize {
+                    let mut frame_into_encoder = frame::Audio::new(
+                        self.enc_audio.format(),
+                        self.enc_audio.frame_size() as usize,
+                        self.enc_audio.channel_layout(),
+                    );
+                    self.fifo().unwrap().pop(&mut frame_into_encoder);
+                    frame_into_encoder.set_rate(self.enc_audio.rate());
+                    frame_into_encoder.set_pts(Some(self.pts));
+                    self.pts += frame_into_encoder.samples() as i64;
+                    self.enc_audio.send_frame(&*frame_into_encoder).unwrap();
+                    self.pop_frames_from_encoder();
+                }
+            } else {
+                self.enc_audio.send_frame(&filtered_frame).unwrap();
+                self.pop_frames_from_encoder();
+            }
+        }
+    }
+
+    fn fifo(&mut self) -> Option<&mut AudioFifo> {
+        self.fifo.as_mut()
+    }
+
+    fn pop_from_decoder(&mut self) {
+        let mut frame = frame::Audio::empty();
+        while self.dec_audio.receive_frame(&mut frame).is_ok() {
+            self.audio_filter
+                .get("in")
+                .unwrap()
+                .source()
+                .add(&*frame)
+                .unwrap();
+        }
+    }
+
+    fn flush(&mut self) {
+        self.dec_audio.send_eof();
+        self.pop_from_decoder();
+        self.audio_filter
+            .get("in")
+            .unwrap()
+            .source()
+            .flush()
+            .unwrap();
+        self.pop_from_filter();
+        self.enc_audio.send_eof();
+        self.pop_frames_from_encoder();
+    }
+
+    fn pop_frames_from_encoder(&mut self) {
         let mut pack = Packet::empty();
         while self.enc_audio.receive_packet(&mut pack).is_ok() {
             pack.set_stream(self.ost_audio_idx);
             pack.rescale_ts(self.dec_audio.time_base(), self.ost_audio_time_base);
-            self.frame_sender.send(pack)?;
+            self.frame_sender
+                .send(pack)
+                .expect("Strange, main thread exited before issuing flush");
 
             pack = Packet::empty();
         }
-        Ok(())
     }
+}
 
-    pub fn create_stream(args: &Args, octx: &mut format::context::Output) -> anyhow::Result<IncompleteAudioState> {
+impl AudioHandle {
+    pub fn create_stream(
+        args: &Args,
+        octx: &mut format::context::Output,
+    ) -> anyhow::Result<IncompleteAudioState> {
         let codec = ffmpeg::encoder::find(
             octx.format()
                 .codec(&args.output, ffmpeg::media::Type::Audio),
@@ -183,10 +226,22 @@ impl AudioState {
             input: audio_input,
         })
     }
+
+    pub fn try_recv(&mut self) -> Result<Packet, TryRecvError> {
+        self.rec.try_recv()
+    }
+
+    pub fn recv(&mut self) -> Result<Packet, RecvError> {
+        self.rec.recv()
+    }
+
+    pub fn start_flush(&mut self) {
+        self.flush_flag.store(true, Ordering::SeqCst);
+    }
 }
 
 impl IncompleteAudioState {
-    pub fn finish(self, _args: &Args, octx: &format::context::Output) -> Receiver<Packet> {
+    pub fn finish(self, _args: &Args, octx: &format::context::Output) -> AudioHandle {
         let audio_stream_time_base = octx.stream(self.ost_stream_idx).unwrap().time_base();
 
         let mut fifo = None;
@@ -215,6 +270,8 @@ impl IncompleteAudioState {
             self.enc_audio.channel_layout(),
         );
 
+        let flush_flag = Arc::new(AtomicBool::new(false));
+
         let audiostate = AudioState {
             // fifo: None,
             enc_audio: self.enc_audio,
@@ -226,10 +283,13 @@ impl IncompleteAudioState {
             ost_audio_idx: self.ost_stream_idx,
             ost_audio_time_base: audio_stream_time_base,
             audio_filter,
+            flush_flag: flush_flag.clone(),
+            fifo,
+            pts: 0,
         };
-        spawn(move || audiostate.thread(self.input, fifo));
+        spawn(move || audiostate.thread(self.input));
 
-        r
+        AudioHandle { rec: r, flush_flag }
     }
 }
 

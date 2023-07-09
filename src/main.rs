@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{bail, format_err};
-use audio::AudioState;
+use audio::AudioHandle;
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec, dict, encoder,
@@ -938,7 +938,7 @@ struct EncState {
     verbose: bool,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
-    audio_receiver: Option<Receiver<Packet>>,
+    audio_receiver: Option<AudioHandle>,
 }
 
 #[derive(Copy, Clone)]
@@ -1178,7 +1178,7 @@ impl EncState {
         ost_video.set_parameters(&enc_video);
 
         let incomplete_audio_state = if args.audio {
-            Some(AudioState::create_stream(args, &mut octx)?)
+            Some(AudioHandle::create_stream(args, &mut octx)?)
         } else {
             None
         };
@@ -1302,7 +1302,17 @@ impl EncState {
         }
     }
 
+    fn flush_audio(&mut self) {
+        if let Some(audio) = &mut self.audio_receiver {
+            audio.start_flush();
+            while let Ok(pack) = audio.recv() {
+                let _ = pack.write_interleaved(&mut self.octx);
+            }
+        }
+    }
+
     fn flush(&mut self) {
+        self.flush_audio();
         self.video_filter
             .get("in")
             .unwrap()
