@@ -1,10 +1,9 @@
 use std::{
     cmp::max,
     ffi::{c_int, CString},
-    ops::ControlFlow,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Receiver, RecvError, SendError, Sender, TryRecvError},
+        mpsc::{channel, Receiver, RecvError, Sender, TryRecvError},
         Arc,
     },
     thread::spawn,
@@ -98,7 +97,7 @@ impl AudioState {
                     frame_into_encoder.set_rate(self.enc_audio.rate());
                     frame_into_encoder.set_pts(Some(self.pts));
                     self.pts += frame_into_encoder.samples() as i64;
-                    self.enc_audio.send_frame(&*frame_into_encoder).unwrap();
+                    self.enc_audio.send_frame(&frame_into_encoder).unwrap();
                     self.pop_frames_from_encoder();
                 }
             } else {
@@ -119,13 +118,13 @@ impl AudioState {
                 .get("in")
                 .unwrap()
                 .source()
-                .add(&*frame)
+                .add(&frame)
                 .unwrap();
         }
     }
 
     fn flush(&mut self) {
-        self.dec_audio.send_eof();
+        self.dec_audio.send_eof().unwrap();
         self.pop_from_decoder();
         self.audio_filter
             .get("in")
@@ -134,7 +133,7 @@ impl AudioState {
             .flush()
             .unwrap();
         self.pop_from_filter();
-        self.enc_audio.send_eof();
+        self.enc_audio.send_eof().unwrap();
         self.pop_frames_from_encoder();
     }
 

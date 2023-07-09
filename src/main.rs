@@ -7,7 +7,6 @@ use std::{
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::Receiver,
         Arc,
     },
     thread::{sleep, spawn},
