@@ -1433,6 +1433,13 @@ fn main() {
 
     let args = Args::parse();
 
+    if !args.audio && args.audio_backend != DEFAULT_AUDIO_BACKEND {
+        eprintln!("Warning: --audio-backend passed without --audio, will be ignored");
+    }
+    if !args.audio && args.audio_device != DEFAULT_AUDIO_CAPTURE_DEVICE {
+        eprintln!("Warning: --audio-device passed without --audio, will be ignored");
+    }
+
     ffmpeg_next::init().unwrap();
 
     if args.verbose {
