@@ -101,8 +101,8 @@ wl-screenrec --codec hevc --encode-pixfmt xrgb10 # 10-bit 444
 Capture with audio:
 
 ```bash
-wl-screenrec --audio                           # default capture device
-wl-screenrec --audio --audio-device <someting> # capture audio going to this device
+wl-screenrec --audio                                                                 # default capture device
+wl-screenrec --audio --audio-device alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor # capture desktop audio (example, use `pactl list short sources` to figure out what you should put here)
 ```
 
 Record with history
@@ -146,9 +146,9 @@ Options:
       --audio
           record audio with the stream. Defaults to the default audio capture device
       --audio-device <AUDIO_DEVICE>
-          which audio device to record from. list devices with `arecord -l` [default: hw:0]
+          which audio device to record from. list devices with `pactl list short sources` [default: default]
       --audio-backend <AUDIO_BACKEND>
-          which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used [default: alsa]
+          which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used [default: pulse]
   -h, --help
           Print help
   -V, --version

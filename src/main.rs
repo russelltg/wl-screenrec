@@ -72,10 +72,10 @@ mod fifo;
 
 #[cfg(target_os = "linux")]
 mod platform {
-    pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "hw:0";
+    pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "default";
     pub const AUDIO_DEVICE_HELP: &str =
-        "which audio device to record from. list devices with `arecord -l`";
-    pub const DEFAULT_AUDIO_BACKEND: &str = "alsa";
+        "which audio device to record from. list devices with `pactl list short sources`";
+    pub const DEFAULT_AUDIO_BACKEND: &str = "pulse";
 }
 #[cfg(target_os = "freebsd")]
 mod platform {
