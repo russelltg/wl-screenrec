@@ -10,7 +10,6 @@ use ffmpeg::{
     ChannelLayout,
 };
 
-
 pub struct AudioFifo(NonNull<AVAudioFifo>);
 
 unsafe impl Send for AudioFifo {}

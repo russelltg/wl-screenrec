@@ -1075,7 +1075,6 @@ impl AudioState {
             .best(ffmpeg::media::Type::Audio)
             .unwrap();
 
-
         let mut dec_audio = Context::from_parameters(best_audio_stream.parameters())
             .unwrap()
             .decoder()
@@ -1086,7 +1085,6 @@ impl AudioState {
             .channel_layouts()
             .map(|cls| cls.best(dec_audio.channel_layout().channels()))
             .unwrap_or(ChannelLayout::STEREO);
-
 
         let mut enc_audio = Context::from_parameters(ost_audio.parameters())
             .unwrap()
@@ -1114,7 +1112,6 @@ impl AudioState {
             input: audio_input,
         }
     }
-
 }
 
 impl IncompleteAudioState {
@@ -1401,7 +1398,11 @@ impl EncState {
         let vid_stream_idx = ost_video.index();
         ost_video.set_parameters(&enc_video);
 
-        let incomplete_audio_state = if args.audio { Some(AudioState::create_stream(args, &mut octx)) } else { None };
+        let incomplete_audio_state = if args.audio {
+            Some(AudioState::create_stream(args, &mut octx))
+        } else {
+            None
+        };
 
         octx.write_header().unwrap();
         let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
