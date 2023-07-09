@@ -39,7 +39,7 @@ impl AudioFifo {
         unsafe {
             av_audio_fifo_write(
                 self.0.as_ptr(),
-                frame.as_ptr().read().data.as_mut_ptr() as _,
+                frame.as_ptr().read().data.as_ptr() as _,
                 frame.samples() as i32,
             ) as usize
         }
