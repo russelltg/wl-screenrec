@@ -16,16 +16,13 @@ use ffmpeg::{
     ffi::{av_find_input_format, av_get_default_channel_layout, AVChannelOrder},
     filter,
     format::{self, context::Input, Sample},
-    frame::{self},
-    ChannelLayout, Dictionary, Format, Packet, Rational,
+    frame, ChannelLayout, Dictionary, Format, Packet, Rational,
 };
 
 use crate::{fifo::AudioFifo, Args};
 
 struct AudioState {
-    // fifo: Option<AudioFifo>,
     enc_audio: encoder::Audio,
-    // audio_input: Input,
     ist_stream_idx: usize,
     audio_stream_time_base: Rational,
     dec_audio: decoder::Audio,
