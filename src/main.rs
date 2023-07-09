@@ -71,17 +71,20 @@ mod audio;
 mod fifo;
 
 #[cfg(target_os = "linux")]
-const DEFAULT_AUDIO_CAPTURE_DEVICE: &'static str = "hw:0";
-
+mod platform {
+    pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "hw:0";
+    pub const AUDIO_DEVICE_HELP: &str =
+        "which audio device to record from. list devices with `arecord -l`";
+    pub const DEFAULT_AUDIO_BACKEND: &str = "alsa";
+}
 #[cfg(target_os = "freebsd")]
-const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "/dev/dsp";
-
-#[cfg(target_os = "linux")]
-const AUDIO_DEVICE_HELP: &'static str =
-    "which audio device to record from. list devices with `arecord -l`";
-
-#[cfg(target_os = "freebsd")]
-const AUDIO_DEVICE_HELP: &str = "which audio device to record from. list devices with `ossinfo -a`";
+mod platform {
+    pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "/dev/dsp";
+    pub const AUDIO_DEVICE_HELP: &str =
+        "which audio device to record from. list devices with `ossinfo -a`";
+    pub const DEFAULT_AUDIO_BACKEND: &str = "oss";
+}
+use platform::*;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -152,6 +155,9 @@ pub struct Args {
 
     #[clap(long, default_value_t = DEFAULT_AUDIO_CAPTURE_DEVICE.to_string(), help = AUDIO_DEVICE_HELP)]
     audio_device: String,
+
+    #[clap(long, default_value_t = DEFAULT_AUDIO_BACKEND.to_string(), help = "which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used")]
+    audio_backend: String,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -1172,7 +1178,7 @@ impl EncState {
         ost_video.set_parameters(&enc_video);
 
         let incomplete_audio_state = if args.audio {
-            Some(AudioState::create_stream(args, &mut octx))
+            Some(AudioState::create_stream(args, &mut octx)?)
         } else {
             None
         };

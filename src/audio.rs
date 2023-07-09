@@ -1,9 +1,22 @@
-use std::{sync::mpsc::{Sender, SendError, Receiver, channel}, cmp::max, ffi::c_int, thread::spawn};
+use std::{
+    cmp::max,
+    ffi::{c_int, CString},
+    sync::mpsc::{channel, Receiver, SendError, Sender},
+    thread::spawn,
+};
 
-use ffmpeg::{encoder, Rational, decoder, frame::{self}, filter, format::{self, context::Input, Sample}, Packet, ffi::{av_find_input_format, AVChannelOrder, av_get_default_channel_layout}, Format, Dictionary, codec::Context, ChannelLayout};
+use anyhow::bail;
+use ffmpeg::{
+    codec::Context,
+    decoder, encoder,
+    ffi::{av_find_input_format, av_get_default_channel_layout, AVChannelOrder},
+    filter,
+    format::{self, context::Input, Sample},
+    frame::{self},
+    ChannelLayout, Dictionary, Format, Packet, Rational,
+};
 
-use crate::{fifo::AudioFifo, Args, };
-
+use crate::{fifo::AudioFifo, Args};
 
 pub struct AudioState {
     // fifo: Option<AudioFifo>,
@@ -100,7 +113,7 @@ impl AudioState {
         Ok(())
     }
 
-    pub fn create_stream(args: &Args, octx: &mut format::context::Output) -> IncompleteAudioState {
+    pub fn create_stream(args: &Args, octx: &mut format::context::Output) -> anyhow::Result<IncompleteAudioState> {
         let codec = ffmpeg::encoder::find(
             octx.format()
                 .codec(&args.output, ffmpeg::media::Type::Audio),
@@ -112,14 +125,11 @@ impl AudioState {
         let mut ost_audio = octx.add_stream(codec).unwrap();
 
         let input_format = unsafe {
-            #[cfg(target_os = "linux")]
-            let sound_input_format = b"alsa\0";
-
-            #[cfg(target_os = "freebsd")]
-            let sound_input_format = b"oss\0";
-
-            let fmt = av_find_input_format(sound_input_format.as_ptr() as _);
-            assert!(!fmt.is_null());
+            let audio_backend = CString::new(args.audio_backend.clone()).unwrap();
+            let fmt = av_find_input_format(audio_backend.as_ptr());
+            if fmt.is_null() {
+                bail!("Failed to acquire input format {}", args.audio_backend);
+            }
             format::Input::wrap(fmt as _)
         };
 
@@ -165,13 +175,13 @@ impl AudioState {
 
         ost_audio.set_parameters(&enc_audio);
 
-        IncompleteAudioState {
+        Ok(IncompleteAudioState {
             ist_stream_idx: best_audio_stream.index(),
             ost_stream_idx: ost_audio.index(),
             enc_audio,
             dec_audio,
             input: audio_input,
-        }
+        })
     }
 }
 
@@ -245,12 +255,12 @@ fn audio_filter(
     g.add(
         &filter::find("abuffer").unwrap(),
         "in",
-        dbg!(&format!(
+        &format!(
             "sample_rate={}:sample_fmt={}:channel_layout={:#x}",
             input.rate(),
             sample_format.name(),
             ch_layout_mask
-        )),
+        ),
     )
     .unwrap();
 
