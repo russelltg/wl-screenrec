@@ -1,4 +1,4 @@
-use std::{ffi::c_int, ptr::NonNull};
+use std::{ptr::NonNull};
 
 use ffmpeg::{
     ffi::{
@@ -7,7 +7,6 @@ use ffmpeg::{
     },
     format,
     frame::Audio,
-    ChannelLayout,
 };
 
 pub struct AudioFifo(NonNull<AVAudioFifo>);

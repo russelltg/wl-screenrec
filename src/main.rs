@@ -4,9 +4,8 @@ use std::{
     cmp::max,
     collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
-    mem::{self, MaybeUninit},
+    mem::{MaybeUninit},
     num::ParseIntError,
-    ptr::{self, null, null_mut, NonNull},
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,19 +20,15 @@ use anyhow::{bail, format_err};
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
     codec,
-    codec::{Audio, Context, Id, Parameters},
+    codec::{Context},
     decoder,
-    device::{self, input::audio},
     dict, encoder,
     ffi::{
-        av_buffer_ref, av_buffer_unref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
-        av_channel_layout_channel_from_index, av_channel_layout_describe,
-        av_channel_layout_from_mask, av_channel_name, av_find_input_format, av_free,
-        av_get_default_channel_layout, av_get_pix_fmt_name, av_hwdevice_ctx_create,
-        av_hwframe_ctx_alloc, av_hwframe_ctx_init, av_hwframe_get_buffer, av_hwframe_map,
+        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
+        av_channel_layout_from_mask, av_find_input_format, av_free,
+        av_get_default_channel_layout, av_get_pix_fmt_name, av_hwframe_map,
         avcodec_alloc_context3, avformat_query_codec, AVChannelLayout, AVChannelOrder,
-        AVDRMFrameDescriptor, AVHWFramesContext, AVPixelFormat, AVSampleFormat,
-        AV_HWFRAME_MAP_READ, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
+        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, context::Input, Pixel, Sample},
@@ -70,7 +65,6 @@ use wayland_protocols_wlr::{
         zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
         zwlr_output_mode_v1::ZwlrOutputModeV1,
     },
-    output_power_management,
     screencopy::v1::client::{
         zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
         zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
@@ -86,14 +80,14 @@ mod fifo;
 const DEFAULT_AUDIO_CAPTURE_DEVICE: &'static str = "hw:0";
 
 #[cfg(target_os = "freebsd")]
-const DEFAULT_AUDIO_CAPTURE_DEVICE: &'static str = "/dev/dsp";
+const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "/dev/dsp";
 
 #[cfg(target_os = "linux")]
 const AUDIO_DEVICE_HELP: &'static str =
     "which audio device to record from. list devices with `arecord -l`";
 
 #[cfg(target_os = "freebsd")]
-const AUDIO_DEVICE_HELP: &'static str =
+const AUDIO_DEVICE_HELP: &str =
     "which audio device to record from. list devices with `ossinfo -a`";
 
 #[derive(Parser, Debug)]
@@ -1040,7 +1034,7 @@ impl AudioState {
     }
 
     fn create_stream(args: &Args, octx: &mut format::context::Output) -> IncompleteAudioState {
-        let mut codec = ffmpeg::encoder::find(
+        let codec = ffmpeg::encoder::find(
             octx.format()
                 .codec(&args.output, ffmpeg::media::Type::Audio),
         )
@@ -1062,7 +1056,7 @@ impl AudioState {
             format::Input::wrap(fmt as _)
         };
 
-        let mut audio_input = format::open_with(
+        let audio_input = format::open_with(
             &args.audio_device,
             &Format::Input(input_format),
             Dictionary::default(),
@@ -1075,7 +1069,7 @@ impl AudioState {
             .best(ffmpeg::media::Type::Audio)
             .unwrap();
 
-        let mut dec_audio = Context::from_parameters(best_audio_stream.parameters())
+        let dec_audio = Context::from_parameters(best_audio_stream.parameters())
             .unwrap()
             .decoder()
             .audio()
@@ -1100,7 +1094,7 @@ impl AudioState {
         enc_audio.set_format(audio_encode_format);
         enc_audio.set_time_base(dec_audio.time_base());
 
-        let mut enc_audio = enc_audio.open_as(codec).unwrap();
+        let enc_audio = enc_audio.open_as(codec).unwrap();
 
         ost_audio.set_parameters(&enc_audio);
 
@@ -1115,7 +1109,7 @@ impl AudioState {
 }
 
 impl IncompleteAudioState {
-    fn finish(self, args: &Args, octx: &format::context::Output) -> Receiver<Packet> {
+    fn finish(self, _args: &Args, octx: &format::context::Output) -> Receiver<Packet> {
         let audio_stream_time_base = octx.stream(self.ost_stream_idx).unwrap().time_base();
 
         let mut fifo = None;
@@ -1144,7 +1138,7 @@ impl IncompleteAudioState {
             self.enc_audio.channel_layout(),
         );
 
-        let mut audiostate = AudioState {
+        let audiostate = AudioState {
             // fifo: None,
             enc_audio: self.enc_audio,
             // audio_input,
