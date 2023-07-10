@@ -1127,12 +1127,11 @@ impl EncState {
                             &mut hw_device_ctx,
                             &mut frames_yuv,
                         )?
-                        .open_with(regular_opts)
-                        .unwrap()
+                        .open_with(regular_opts)?
                     }
                 },
-                LowPowerMode::On => enc.open_with(low_power_opts).unwrap(),
-                LowPowerMode::Off => enc.open_with(regular_opts).unwrap(),
+                LowPowerMode::On => enc.open_with(low_power_opts)?,
+                LowPowerMode::Off => enc.open_with(regular_opts)?,
             }
         } else {
             enc.open_with(dict! {
