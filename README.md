@@ -98,6 +98,13 @@ wl-screenrec --codec hevc --encode-pixfmt vuyx   # 8-bit 444
 wl-screenrec --codec hevc --encode-pixfmt xrgb10 # 10-bit 444
 ```
 
+Capture with audio:
+
+```bash
+wl-screenrec --audio                                                                 # default capture device
+wl-screenrec --audio --audio-device alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor # capture desktop audio (example, use `pactl list short sources` to figure out what you should put here)
+```
+
 Record with history
 ```bash
 wl-screenrec --history 10 & # record the most recent 10 seconds into memory, not writing into the file
@@ -136,6 +143,12 @@ Options:
           bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps [default: "5 MB"]
       --history <HISTORY>
           run in a mode where the screen is recorded, but nothing is written to the output file until SIGUSR1 is sent to the process. Then, it writes the most recent N seconds to a file and continues recording
+      --audio
+          record audio with the stream. Defaults to the default audio capture device
+      --audio-device <AUDIO_DEVICE>
+          which audio device to record from. list devices with `pactl list short sources` [default: default]
+      --audio-backend <AUDIO_BACKEND>
+          which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used [default: pulse]
   -h, --help
           Print help
   -V, --version
