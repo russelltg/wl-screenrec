@@ -1288,18 +1288,34 @@ impl EncState {
                     / 1_000_000_000) as i64;
 
                 encoded.set_pts(Some(encoded.pts().unwrap() - pts_offset));
+                if self.verbose >= 3 {
+                    eprintln!(
+                        "writing pts={} on {:?} is_key={}",
+                        encoded.pts().unwrap(),
+                        self.octx
+                            .stream(encoded.stream())
+                            .unwrap()
+                            .parameters()
+                            .medium(),
+                        encoded.is_key()
+                    );
+                }
                 encoded.set_dts(encoded.dts().map(|dts| dts - pts_offset));
                 encoded.write_interleaved(&mut self.octx).unwrap();
             }
             HistoryState::RecordingHistory(history_dur, history) => {
                 // discard old history if necessary
+                history.push_back(encoded.clone());
 
-                // find first key packet (other than the first one)
-                // we want to make sure the first packet is always a key packet
-                while let Some((key_idx, _)) = history
+                while let Some(front) = history.front() {
+                    if encoded.stream() != front.stream() {
+                        break;
+                    }
+
+                    if let Some((key_idx, _)) = history
                     .iter()
                     .enumerate()
-                    .filter(|(_, a)| a.stream() == encoded.stream() && a.is_key())
+                        .filter(|(_, a)| a.stream() == front.stream() && a.is_key())
                     .nth(1)
                 {
                     let key_pts = history[key_idx].pts().unwrap();
@@ -1340,11 +1356,12 @@ impl EncState {
                                 );
                         }
                     } else {
-                        break;
+                            break; // there is a second keyframe in the stream, but it isn't old enough yet
+                        }
+                    } else {
+                        break; // no second keyframe in the stream
                     }
                 }
-
-                history.push_back(encoded.clone());
             }
         }
     }
