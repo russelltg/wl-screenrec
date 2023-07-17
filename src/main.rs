@@ -1220,14 +1220,20 @@ impl EncState {
             self.sigusr1_flag.load(Ordering::SeqCst),
         ) {
             // write history to container
-            let pts_offset = hist
-                .front()
-                .map(|first| {
-                    let tb = self.octx.stream(first.stream()).unwrap().time_base();
+
+            // find minumum PTS offset of all streams to make sure
+            // that there are no negative PTS values
+            let pts_offset = self
+                .octx
+                .streams()
+                .filter_map(|st| hist.iter().find(|p| p.stream() == st.index()))
+                .map(|packet| {
+                    let tb = self.octx.stream(packet.stream()).unwrap().time_base();
                     Duration::from_nanos(
-                        first.pts().unwrap() as u64 * 1_000_000_000 * tb.0 as u64 / tb.1 as u64,
+                        packet.pts().unwrap() as u64 * 1_000_000_000 * tb.0 as u64 / tb.1 as u64,
                     )
                 })
+                .min()
                 .unwrap_or(Duration::ZERO);
 
             for packet in hist {
@@ -1237,11 +1243,26 @@ impl EncState {
                     / 1_000_000_000) as i64;
 
                 packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
+                if self.verbose >= 3 {
+                    eprintln!(
+                        "writing from history pts={} on {:?} key={}",
+                        packet.pts().unwrap(),
+                        self.octx
+                            .stream(packet.stream())
+                            .unwrap()
+                            .parameters()
+                            .medium(),
+                        packet.is_key()
+                    );
+                }
                 packet.set_dts(packet.dts().map(|dts| dts - pts_offset));
                 packet.write_interleaved(&mut self.octx).unwrap();
             }
 
             eprintln!("SIGUSR1 received, flushing history");
+            if self.verbose >= 1 {
+                eprintln!("pts offset is {:?}", pts_offset);
+            }
 
             // transition history state
             self.history_state = HistoryState::Recording(pts_offset);
@@ -1313,49 +1334,49 @@ impl EncState {
                     }
 
                     if let Some((key_idx, _)) = history
-                    .iter()
-                    .enumerate()
+                        .iter()
+                        .enumerate()
                         .filter(|(_, a)| a.stream() == front.stream() && a.is_key())
-                    .nth(1)
-                {
-                    let key_pts = history[key_idx].pts().unwrap();
+                        .nth(1)
+                    {
+                        let key_pts = history[key_idx].pts().unwrap();
 
-                    let current_history_size_pts =
-                        u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
-                    let current_history_size = Duration::from_nanos(
-                        current_history_size_pts * stream.time_base().0 as u64 * 1_000_000_000
-                            / stream.time_base().1 as u64,
-                    );
+                        let current_history_size_pts =
+                            u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
+                        let current_history_size = Duration::from_nanos(
+                            current_history_size_pts * stream.time_base().0 as u64 * 1_000_000_000
+                                / stream.time_base().1 as u64,
+                        );
 
-                    if current_history_size > *history_dur {
-                        // erase everything in that stream <= key_idx
-                        let mut removed_bytes = 0;
-                        let mut removed_packets = 0;
+                        if current_history_size > *history_dur {
+                            // erase everything in that stream <= key_idx
+                            let mut removed_bytes = 0;
+                            let mut removed_packets = 0;
 
-                        let mut final_idx = key_idx;
-                        let mut i = 0;
-                        while i < final_idx {
-                            if history[i].stream() == encoded.stream() {
-                                removed_bytes += history[i].size();
-                                removed_packets += 1;
+                            let mut final_idx = key_idx;
+                            let mut i = 0;
+                            while i < final_idx {
+                                if history[i].stream() == encoded.stream() {
+                                    removed_bytes += history[i].size();
+                                    removed_packets += 1;
 
-                                history.remove(i);
-                                final_idx -= 1;
-                            } else {
-                                i += 1;
+                                    history.remove(i);
+                                    final_idx -= 1;
+                                } else {
+                                    i += 1;
+                                }
                             }
-                        }
 
-                        if self.verbose >= 2 {
-                            eprintln!(
-                                    "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
-                                    current_history_size, history_dur,
-                                    removed_bytes,
-                                    removed_packets,
-                                    self.octx.stream(encoded.stream()).unwrap().parameters().medium()
-                                );
-                        }
-                    } else {
+                            if self.verbose >= 2 {
+                                eprintln!(
+                                        "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
+                                        current_history_size, history_dur,
+                                        removed_bytes,
+                                        removed_packets,
+                                        self.octx.stream(encoded.stream()).unwrap().parameters().medium()
+                                    );
+                            }
+                        } else {
                             break; // there is a second keyframe in the stream, but it isn't old enough yet
                         }
                     } else {
