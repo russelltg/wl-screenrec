@@ -1,7 +1,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
     ffi::{c_int, CStr},
     num::ParseIntError,
     str::from_utf8_unchecked,
@@ -20,7 +20,7 @@ use ffmpeg::{
     codec, dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec,
+        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec, remove,
         AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
@@ -110,8 +110,8 @@ pub struct Args {
     )]
     output: String,
 
-    #[clap(long, short, help = "add very loud logging")]
-    verbose: bool,
+    #[clap(long, short, default_value = "0", action=ArgAction::Count, help = "add very loud logging. can be specified multiple times")]
+    verbose: u8,
 
     #[clap(long, default_value = "/dev/dri/renderD128")]
     dri_device: String,
@@ -934,7 +934,7 @@ struct EncState {
     filter_output_timebase: Rational,
     octx_time_base: Rational,
     vid_stream_idx: usize,
-    verbose: bool,
+    verbose: u8,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
     audio_receiver: Option<AudioHandle>,
@@ -1114,7 +1114,7 @@ impl EncState {
             )
             .unwrap();
 
-        if args.verbose {
+        if args.verbose >= 1 {
             println!("{}", video_filter.dump());
         }
 
@@ -1186,7 +1186,7 @@ impl EncState {
 
         let audio_receiver = incomplete_audio_state.map(|ias| ias.finish(args, &octx));
 
-        if args.verbose {
+        if args.verbose >= 1 {
             ffmpeg_next::format::context::output::dump(&octx, 0, Some(&args.filename));
         }
 
@@ -1253,7 +1253,11 @@ impl EncState {
             encoded = Packet::empty();
         }
 
-        while let Some(pack) = self.audio_receiver.as_mut().and_then(|ar| ar.try_recv().ok()) {
+        while let Some(pack) = self
+            .audio_receiver
+            .as_mut()
+            .and_then(|ar| ar.try_recv().ok())
+        {
             self.on_encoded_packet(pack);
         }
     }
@@ -1270,10 +1274,12 @@ impl EncState {
 
                 // find first key packet (other than the first one)
                 // we want to make sure the first packet is always a key packet
-                while let Some(key_idx_minus_one) =
-                    history.iter().skip(1).position(|packet| packet.is_key())
+                while let Some((key_idx, _)) = history
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| a.stream() == encoded.stream() && a.is_key())
+                    .nth(1)
                 {
-                    let key_idx = key_idx_minus_one + 1;
                     let key_pts = history[key_idx].pts().unwrap();
 
                     let current_history_size_pts =
@@ -1284,13 +1290,33 @@ impl EncState {
                     );
 
                     if current_history_size > *history_dur {
-                        if self.verbose {
-                            eprintln!(
-                                "history is {:?} > {:?}, popping from history buffer",
-                                current_history_size, history_dur
-                            );
+                        // erase everything in that stream <= key_idx
+                        let mut removed_bytes = 0;
+                        let mut removed_packets = 0;
+
+                        let mut final_idx = key_idx;
+                        let mut i = 0;
+                        while i < final_idx {
+                            if history[i].stream() == encoded.stream() {
+                                removed_bytes += history[i].size();
+                                removed_packets += 1;
+
+                                history.remove(i);
+                                final_idx -= 1;
+                            } else {
+                                i += 1;
+                            }
                         }
-                        history.drain(0..key_idx);
+
+                        if self.verbose >= 2 {
+                            eprintln!(
+                                    "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
+                                    current_history_size, history_dur,
+                                    removed_bytes,
+                                    removed_packets,
+                                    self.octx.stream(encoded.stream()).unwrap().parameters().medium()
+                                );
+                        }
                     } else {
                         break;
                     }
@@ -1451,7 +1477,7 @@ fn main() {
 
     ffmpeg_next::init().unwrap();
 
-    if args.verbose {
+    if args.verbose >= 3 {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
     }
 
