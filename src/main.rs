@@ -1249,53 +1249,54 @@ impl EncState {
             encoded.set_stream(self.vid_stream_idx);
             encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
 
-            match &mut self.history_state {
-                HistoryState::Recording(pts_offset) => {
-                    encoded.set_pts(Some(encoded.pts().unwrap() - *pts_offset));
-                    encoded.set_dts(encoded.dts().map(|dts| dts - *pts_offset));
-                    encoded.write_interleaved(&mut self.octx).unwrap();
-                }
-                HistoryState::RecordingHistory(history_dur, history) => {
-                    // discard old history if necessary
-
-                    // find first key packet (other than the first one)
-                    // we want to make sure the first packet is always a key packet
-                    while let Some(key_idx_minus_one) =
-                        history.iter().skip(1).position(|packet| packet.is_key())
-                    {
-                        let key_idx = key_idx_minus_one + 1;
-                        let key_pts = history[key_idx].pts().unwrap();
-
-                        let current_history_size_pts =
-                            u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
-                        let current_history_size = Duration::from_nanos(
-                            current_history_size_pts * self.octx_time_base.0 as u64 * 1_000_000_000
-                                / self.octx_time_base.1 as u64,
-                        );
-
-                        if current_history_size > *history_dur {
-                            if self.verbose {
-                                eprintln!(
-                                    "history is {:?} > {:?}, popping from history buffer",
-                                    current_history_size, history_dur
-                                );
-                            }
-                            history.drain(0..key_idx);
-                        } else {
-                            break;
-                        }
-                    }
-
-                    history.push_back(encoded.clone());
-                }
-            }
-
+            self.on_encoded_packet(encoded);
             encoded = Packet::empty();
         }
 
-        if let Some(chan) = &mut self.audio_receiver {
-            while let Ok(pack) = chan.try_recv() {
-                let _ = pack.write_interleaved(&mut self.octx);
+        while let Some(pack) = self.audio_receiver.as_mut().and_then(|ar| ar.try_recv().ok()) {
+            self.on_encoded_packet(pack);
+        }
+    }
+
+    fn on_encoded_packet(&mut self, mut encoded: Packet) {
+        match &mut self.history_state {
+            HistoryState::Recording(pts_offset) => {
+                encoded.set_pts(Some(encoded.pts().unwrap() - *pts_offset));
+                encoded.set_dts(encoded.dts().map(|dts| dts - *pts_offset));
+                encoded.write_interleaved(&mut self.octx).unwrap();
+            }
+            HistoryState::RecordingHistory(history_dur, history) => {
+                // discard old history if necessary
+
+                // find first key packet (other than the first one)
+                // we want to make sure the first packet is always a key packet
+                while let Some(key_idx_minus_one) =
+                    history.iter().skip(1).position(|packet| packet.is_key())
+                {
+                    let key_idx = key_idx_minus_one + 1;
+                    let key_pts = history[key_idx].pts().unwrap();
+
+                    let current_history_size_pts =
+                        u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
+                    let current_history_size = Duration::from_nanos(
+                        current_history_size_pts * self.octx_time_base.0 as u64 * 1_000_000_000
+                            / self.octx_time_base.1 as u64,
+                    );
+
+                    if current_history_size > *history_dur {
+                        if self.verbose {
+                            eprintln!(
+                                "history is {:?} > {:?}, popping from history buffer",
+                                current_history_size, history_dur
+                            );
+                        }
+                        history.drain(0..key_idx);
+                    } else {
+                        break;
+                    }
+                }
+
+                history.push_back(encoded.clone());
             }
         }
     }
