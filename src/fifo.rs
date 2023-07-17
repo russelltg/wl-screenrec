@@ -1,4 +1,4 @@
-use std::{ptr::NonNull};
+use std::ptr::NonNull;
 
 use ffmpeg::{
     ffi::{

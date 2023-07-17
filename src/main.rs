@@ -1,7 +1,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
     num::ParseIntError,
     str::from_utf8_unchecked,
@@ -20,7 +20,7 @@ use ffmpeg::{
     codec, dict, encoder,
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec, remove,
+        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec,
         AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
@@ -369,7 +369,7 @@ impl EncConstructionStage {
 
 enum HistoryState {
     RecordingHistory(Duration, VecDeque<Packet>), // --history specified, but SIGUSR1 not received yet. State is (duration of history, history)
-    Recording(i64), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset, which is required when using history
+    Recording(Duration), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset, which is required when using history. If a stream is not present, then assume 0 offset
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -432,8 +432,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
                 let pts_abs = secs * 1_000_000_000 + i64::from(tv_nsec);
 
+                let enc = state.enc.unwrap();
+
                 if state.starting_timestamp.is_none() {
                     state.starting_timestamp = Some(pts_abs);
+
+                    // start audio when we get the first timestamp so it's properly sync'd
+                    if let Some(audio) = &mut enc.audio {
+                        audio.start();
+                    }
                 }
                 let pts = pts_abs - state.starting_timestamp.unwrap();
                 surf.set_pts(Some(pts));
@@ -443,7 +450,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
                 }
 
-                state.enc.unwrap().push(surf);
+                enc.push(surf);
 
                 state.queue_copy(qhandle);
             }
@@ -932,12 +939,11 @@ struct EncState {
     octx: format::context::Output,
     frames_rgb: AvHwFrameCtx,
     filter_output_timebase: Rational,
-    octx_time_base: Rational,
     vid_stream_idx: usize,
     verbose: u8,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
-    audio_receiver: Option<AudioHandle>,
+    audio: Option<AudioHandle>,
 }
 
 #[derive(Copy, Clone)]
@@ -1182,9 +1188,7 @@ impl EncState {
         };
 
         octx.write_header().unwrap();
-        let octx_time_base = octx.stream(vid_stream_idx).unwrap().time_base();
-
-        let audio_receiver = incomplete_audio_state.map(|ias| ias.finish(args, &octx));
+        let audio = incomplete_audio_state.map(|ias| ias.finish(args, &octx));
 
         if args.verbose >= 1 {
             ffmpeg_next::format::context::output::dump(&octx, 0, Some(&args.filename));
@@ -1192,21 +1196,20 @@ impl EncState {
 
         let history_state = match args.history {
             Some(history) => HistoryState::RecordingHistory(history, VecDeque::new()),
-            None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
+            None => HistoryState::Recording(Duration::ZERO), // recording since the beginnging, no PTS offset
         };
 
         Ok(EncState {
             video_filter,
             enc_video,
             filter_output_timebase: filter_timebase,
-            octx_time_base,
             octx,
             vid_stream_idx,
             frames_rgb,
             verbose: args.verbose,
             history_state,
             sigusr1_flag,
-            audio_receiver,
+            audio,
         })
     }
 
@@ -1217,9 +1220,22 @@ impl EncState {
             self.sigusr1_flag.load(Ordering::SeqCst),
         ) {
             // write history to container
-            let pts_offset = hist.front().map(|first| first.pts().unwrap()).unwrap_or(0);
+            let pts_offset = hist
+                .front()
+                .map(|first| {
+                    let tb = self.octx.stream(first.stream()).unwrap().time_base();
+                    Duration::from_nanos(
+                        first.pts().unwrap() as u64 * 1_000_000_000 * tb.0 as u64 / tb.1 as u64,
+                    )
+                })
+                .unwrap_or(Duration::ZERO);
 
             for packet in hist {
+                let tb = self.octx.stream(packet.stream()).unwrap().time_base();
+                let pts_offset = (pts_offset.as_nanos() * (tb.1 as u128)
+                    / (tb.0 as u128)
+                    / 1_000_000_000) as i64;
+
                 packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
                 packet.set_dts(packet.dts().map(|dts| dts - pts_offset));
                 packet.write_interleaved(&mut self.octx).unwrap();
@@ -1247,26 +1263,32 @@ impl EncState {
         let mut encoded = Packet::empty();
         while self.enc_video.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(self.vid_stream_idx);
-            encoded.rescale_ts(self.filter_output_timebase, self.octx_time_base);
+            encoded.rescale_ts(
+                self.filter_output_timebase,
+                self.octx.stream(self.vid_stream_idx).unwrap().time_base(),
+            );
 
             self.on_encoded_packet(encoded);
             encoded = Packet::empty();
         }
 
-        while let Some(pack) = self
-            .audio_receiver
-            .as_mut()
-            .and_then(|ar| ar.try_recv().ok())
-        {
+        while let Some(pack) = self.audio.as_mut().and_then(|ar| ar.try_recv().ok()) {
             self.on_encoded_packet(pack);
         }
     }
 
     fn on_encoded_packet(&mut self, mut encoded: Packet) {
+        let stream = self.octx.stream(encoded.stream()).unwrap();
+
         match &mut self.history_state {
             HistoryState::Recording(pts_offset) => {
-                encoded.set_pts(Some(encoded.pts().unwrap() - *pts_offset));
-                encoded.set_dts(encoded.dts().map(|dts| dts - *pts_offset));
+                let tb = stream.time_base();
+                let pts_offset = (pts_offset.as_nanos() * (tb.1 as u128)
+                    / (tb.0 as u128)
+                    / 1_000_000_000) as i64;
+
+                encoded.set_pts(Some(encoded.pts().unwrap() - pts_offset));
+                encoded.set_dts(encoded.dts().map(|dts| dts - pts_offset));
                 encoded.write_interleaved(&mut self.octx).unwrap();
             }
             HistoryState::RecordingHistory(history_dur, history) => {
@@ -1285,8 +1307,8 @@ impl EncState {
                     let current_history_size_pts =
                         u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
                     let current_history_size = Duration::from_nanos(
-                        current_history_size_pts * self.octx_time_base.0 as u64 * 1_000_000_000
-                            / self.octx_time_base.1 as u64,
+                        current_history_size_pts * stream.time_base().0 as u64 * 1_000_000_000
+                            / stream.time_base().1 as u64,
                     );
 
                     if current_history_size > *history_dur {
@@ -1328,7 +1350,7 @@ impl EncState {
     }
 
     fn flush_audio(&mut self) {
-        if let Some(audio) = &mut self.audio_receiver {
+        if let Some(audio) = &mut self.audio {
             audio.start_flush();
             while let Ok(pack) = audio.recv() {
                 let _ = pack.write_interleaved(&mut self.octx);

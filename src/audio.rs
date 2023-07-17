@@ -37,11 +37,13 @@ struct AudioState {
     fifo: Option<AudioFifo>,
 
     pts: i64,
+    started: Arc<AtomicBool>,
 }
 
 pub struct AudioHandle {
     rec: Receiver<Packet>,
     flush_flag: Arc<AtomicBool>,
+    started: Arc<AtomicBool>,
 }
 
 pub struct IncompleteAudioState {
@@ -58,6 +60,10 @@ impl AudioState {
         assert_ne!(self.ost_audio_time_base, Rational::new(0, 0));
 
         for (stream, mut packet) in audio_input.packets() {
+            if !self.started.load(Ordering::SeqCst) {
+                continue;
+            }
+
             if stream.index() == self.ist_stream_idx {
                 packet.rescale_ts(self.audio_stream_time_base, self.dec_audio.time_base());
                 self.dec_audio.send_packet(&packet).unwrap();
@@ -149,6 +155,11 @@ impl AudioState {
 }
 
 impl AudioHandle {
+    pub fn start(&mut self) {
+        let was_started = self.started.swap(true, Ordering::SeqCst);
+        assert!(!was_started, "don't call start more than once");
+    }
+
     pub fn create_stream(
         args: &Args,
         octx: &mut format::context::Output,
@@ -268,7 +279,9 @@ impl IncompleteAudioState {
 
         let flush_flag = Arc::new(AtomicBool::new(false));
 
-        let audiostate = AudioState {
+        let started = Arc::new(AtomicBool::new(false));
+
+        let state = AudioState {
             // fifo: None,
             enc_audio: self.enc_audio,
             // audio_input,
@@ -282,10 +295,16 @@ impl IncompleteAudioState {
             flush_flag: flush_flag.clone(),
             fifo,
             pts: 0,
+            started: started.clone(),
         };
-        spawn(move || audiostate.thread(self.input));
 
-        AudioHandle { rec: r, flush_flag }
+        spawn(|| state.thread(self.input));
+
+        AudioHandle {
+            rec: r,
+            flush_flag,
+            started,
+        }
     }
 }
 
