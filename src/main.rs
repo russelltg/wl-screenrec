@@ -3,6 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
+    mem::swap,
     num::ParseIntError,
     os::fd::AsRawFd,
     str::from_utf8_unchecked,
@@ -46,9 +47,9 @@ use wayland_protocols::{
     wp::{
         drm_lease::v1::client::wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
         linux_dmabuf::zv1::client::{
-        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-    },
+            zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+            zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+        },
     },
     xdg::xdg_output::zv1::client::{
         zxdg_output_manager_v1::ZxdgOutputManagerV1,
@@ -1300,36 +1301,21 @@ impl EncState {
                 .min()
                 .unwrap_or(0);
 
-            for packet in hist {
-                let tb = self.octx.stream(packet.stream()).unwrap().time_base();
-                let pts_offset = pts_offset_ns * i64::from(tb.1)
-                    / i64::from(tb.0)
-                    / 1_000_000_000;
-
-                packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
-                if self.verbose >= 3 {
-                    eprintln!(
-                        "writing from history pts={} on {:?} key={}",
-                        packet.pts().unwrap(),
-                        self.octx
-                            .stream(packet.stream())
-                            .unwrap()
-                            .parameters()
-                            .medium(),
-                        packet.is_key()
-                    );
-                }
-                packet.set_dts(packet.dts().map(|dts| dts - pts_offset));
-                packet.write_interleaved(&mut self.octx).unwrap();
-            }
-
             eprintln!("SIGUSR1 received, flushing history");
             if self.verbose >= 1 {
                 eprintln!("pts offset is {:?}ns", pts_offset_ns);
             }
 
+            // grab this before we set history_state
+            let mut hist_moved = VecDeque::new();
+            swap(hist, &mut hist_moved);
+
             // transition history state
             self.history_state = HistoryState::Recording(pts_offset_ns);
+
+            for packet in hist_moved.drain(..) {
+                self.on_encoded_packet(packet);
+            }
         }
 
         let mut yuv_frame = frame::Video::empty();
@@ -1368,9 +1354,7 @@ impl EncState {
         match &mut self.history_state {
             HistoryState::Recording(pts_offset) => {
                 let tb = stream.time_base();
-                let pts_offset = *pts_offset * i64::from(tb.1)
-                    / i64::from(tb.0)
-                    / 1_000_000_000;
+                let pts_offset = *pts_offset * i64::from(tb.1) / i64::from(tb.0) / 1_000_000_000;
 
                 encoded.set_pts(Some(encoded.pts().unwrap() - pts_offset));
                 if self.verbose >= 3 {
@@ -1457,9 +1441,9 @@ impl EncState {
     fn flush_audio(&mut self) {
         if let Some(audio) = &mut self.audio {
             audio.start_flush();
-            while let Ok(pack) = audio.recv() {
-                let _ = pack.write_interleaved(&mut self.octx);
-            }
+        }
+        while let Some(pack) = self.audio.as_mut().and_then(|a| a.recv().ok()) {
+            self.on_encoded_packet(pack);
         }
     }
 
