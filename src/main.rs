@@ -369,7 +369,7 @@ impl EncConstructionStage {
 
 enum HistoryState {
     RecordingHistory(Duration, VecDeque<Packet>), // --history specified, but SIGUSR1 not received yet. State is (duration of history, history)
-    Recording(Duration), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset, which is required when using history. If a stream is not present, then assume 0 offset
+    Recording(i64), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset (in nanoseconds), which is required when using history. If a stream is not present, then assume 0 offset
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
@@ -1196,7 +1196,7 @@ impl EncState {
 
         let history_state = match args.history {
             Some(history) => HistoryState::RecordingHistory(history, VecDeque::new()),
-            None => HistoryState::Recording(Duration::ZERO), // recording since the beginnging, no PTS offset
+            None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
 
         Ok(EncState {
@@ -1223,24 +1223,22 @@ impl EncState {
 
             // find minumum PTS offset of all streams to make sure
             // that there are no negative PTS values
-            let pts_offset = self
+            let pts_offset_ns = self
                 .octx
                 .streams()
                 .filter_map(|st| hist.iter().find(|p| p.stream() == st.index()))
                 .map(|packet| {
                     let tb = self.octx.stream(packet.stream()).unwrap().time_base();
-                    Duration::from_nanos(
-                        packet.pts().unwrap() as u64 * 1_000_000_000 * tb.0 as u64 / tb.1 as u64,
-                    )
+                    packet.pts().unwrap() as i64 * 1_000_000_000 * tb.0 as i64 / tb.1 as i64
                 })
                 .min()
-                .unwrap_or(Duration::ZERO);
+                .unwrap_or(0);
 
             for packet in hist {
                 let tb = self.octx.stream(packet.stream()).unwrap().time_base();
-                let pts_offset = (pts_offset.as_nanos() * (tb.1 as u128)
-                    / (tb.0 as u128)
-                    / 1_000_000_000) as i64;
+                let pts_offset = pts_offset_ns * i64::from(tb.1)
+                    / i64::from(tb.0)
+                    / 1_000_000_000;
 
                 packet.set_pts(Some(packet.pts().unwrap() - pts_offset));
                 if self.verbose >= 3 {
@@ -1261,11 +1259,11 @@ impl EncState {
 
             eprintln!("SIGUSR1 received, flushing history");
             if self.verbose >= 1 {
-                eprintln!("pts offset is {:?}", pts_offset);
+                eprintln!("pts offset is {:?}ns", pts_offset_ns);
             }
 
             // transition history state
-            self.history_state = HistoryState::Recording(pts_offset);
+            self.history_state = HistoryState::Recording(pts_offset_ns);
         }
 
         let mut yuv_frame = frame::Video::empty();
@@ -1304,9 +1302,9 @@ impl EncState {
         match &mut self.history_state {
             HistoryState::Recording(pts_offset) => {
                 let tb = stream.time_base();
-                let pts_offset = (pts_offset.as_nanos() * (tb.1 as u128)
-                    / (tb.0 as u128)
-                    / 1_000_000_000) as i64;
+                let pts_offset = *pts_offset * i64::from(tb.1)
+                    / i64::from(tb.0)
+                    / 1_000_000_000;
 
                 encoded.set_pts(Some(encoded.pts().unwrap() - pts_offset));
                 if self.verbose >= 3 {
@@ -1325,13 +1323,16 @@ impl EncState {
                 encoded.write_interleaved(&mut self.octx).unwrap();
             }
             HistoryState::RecordingHistory(history_dur, history) => {
-                // discard old history if necessary
-                history.push_back(encoded.clone());
+                history.push_back(encoded);
 
+                // discard old history if necessary
                 while let Some(front) = history.front() {
-                    if encoded.stream() != front.stream() {
-                        break;
-                    }
+                    let last_in_stream = history
+                        .iter()
+                        .rev()
+                        .find(|p| p.stream() == front.stream())
+                        .unwrap()
+                        .clone();
 
                     if let Some((key_idx, _)) = history
                         .iter()
@@ -1342,7 +1343,7 @@ impl EncState {
                         let key_pts = history[key_idx].pts().unwrap();
 
                         let current_history_size_pts =
-                            u64::try_from(encoded.pts().unwrap() - key_pts).unwrap();
+                            u64::try_from(last_in_stream.pts().unwrap() - key_pts).unwrap();
                         let current_history_size = Duration::from_nanos(
                             current_history_size_pts * stream.time_base().0 as u64 * 1_000_000_000
                                 / stream.time_base().1 as u64,
@@ -1356,7 +1357,7 @@ impl EncState {
                             let mut final_idx = key_idx;
                             let mut i = 0;
                             while i < final_idx {
-                                if history[i].stream() == encoded.stream() {
+                                if history[i].stream() == last_in_stream.stream() {
                                     removed_bytes += history[i].size();
                                     removed_packets += 1;
 
@@ -1373,7 +1374,7 @@ impl EncState {
                                         current_history_size, history_dur,
                                         removed_bytes,
                                         removed_packets,
-                                        self.octx.stream(encoded.stream()).unwrap().parameters().medium()
+                                        self.octx.stream(last_in_stream.stream()).unwrap().parameters().medium()
                                     );
                             }
                         } else {
