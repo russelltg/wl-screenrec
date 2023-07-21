@@ -16,4 +16,6 @@ drm-fourcc = "2.2.0"
 human-size = "0.4.2"
 signal-hook = "0.3.15"
 anyhow = "1.0.71"
+drm-sys = { version = "0.4.0", git = "https://github.com/russelltg/drm-rs", features = ["pkg-config"] }
+libc = "0.2.147"
 
