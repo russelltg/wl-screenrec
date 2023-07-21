@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     ffi::{c_int, CStr},
     num::ParseIntError,
+    os::fd::AsRawFd,
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -42,9 +43,12 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
-    wp::linux_dmabuf::zv1::client::{
+    wp::{
+        drm_lease::v1::client::wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
+        linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
         zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
+    },
     },
     xdg::xdg_output::zv1::client::{
         zxdg_output_manager_v1::ZxdgOutputManagerV1,
@@ -113,8 +117,11 @@ pub struct Args {
     #[clap(long, short, default_value = "0", action=ArgAction::Count, help = "add very loud logging. can be specified multiple times")]
     verbose: u8,
 
-    #[clap(long, default_value = "/dev/dri/renderD128")]
-    dri_device: String,
+    #[clap(
+        long,
+        help = "which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol, if present. if not present, /dev/dri/renderD128 is guessed"
+    )]
+    dri_device: Option<String>,
 
     #[clap(long, value_enum, default_value_t)]
     low_power: LowPowerMode,
@@ -339,6 +346,7 @@ struct State {
     outputs: BTreeMap<u32, OutputInfo>,
     quit_flag: Arc<AtomicBool>,
     sigusr1_flag: Arc<AtomicBool>,
+    dri_device: Option<String>,
 }
 
 enum EncConstructionStage {
@@ -477,6 +485,10 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                                 (*x, *y),
                                 (*w, *h),
                                 Arc::clone(&state.sigusr1_flag),
+                                state
+                                    .dri_device
+                                    .as_ref()
+                                    .expect("somehow got screenrec before getting DRI device?"),
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
@@ -707,6 +719,36 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
     }
 }
 
+impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        _proxy: &WpDrmLeaseDeviceV1,
+        event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            wp_drm_lease_device_v1::Event::DrmFd { fd } => {
+                unsafe {
+                    let ptr = drm_sys::drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
+                    state.dri_device = Some(if ptr.is_null() {
+                        eprintln!(
+                            "drmGetDeviceFromFd2 returned null, guessing /dev/dri/renderD128"
+                        );
+                        "/dev/dri/renderD128".to_owned()
+                    } else {
+                        let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
+                        libc::free(ptr as *mut _);
+                        ret
+                    });
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
 impl State {
     fn new(
         conn: &Connection,
@@ -755,6 +797,28 @@ impl State {
             )
             .expect("Your compositor does not seem to support the wlr-output-manager protocol. wl-screenrec requires a wlroots based compositor like sway or Hyprland");
 
+        let dri_device = if let Some(dev) = &args.dri_device {
+            Some(dev.clone())
+        } else {
+            if gm
+                .bind::<WpDrmLeaseDeviceV1, _, _>(
+                    &eq,
+                    WpDrmLeaseDeviceV1::interface().version
+                        ..=WpDrmLeaseDeviceV1::interface().version,
+                    (),
+                )
+                .is_err()
+            {
+                if args.verbose >= 1 {
+                    eprintln!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128");
+                }
+
+                Some("/dev/dri/renderD128".to_owned())
+            } else {
+                None // will be filled by the callback
+            }
+        };
+
         let mut partial_outputs = BTreeMap::new();
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
@@ -793,6 +857,7 @@ impl State {
                 output_fractional_scales: BTreeMap::new(),
                 quit_flag,
                 sigusr1_flag,
+                dri_device,
             },
             queue,
         )
@@ -1014,6 +1079,7 @@ impl EncState {
         (encode_x, encode_y): (i32, i32),
         (encode_w, encode_h): (i32, i32),
         sigusr1_flag: Arc<AtomicBool>,
+        dri_device: &str,
     ) -> anyhow::Result<Self> {
         let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
 
@@ -1096,7 +1162,7 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let mut hw_device_ctx = AvHwDevCtx::new_libva(&args.dri_device);
+        let mut hw_device_ctx = AvHwDevCtx::new_libva(&dri_device);
         let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .unwrap();

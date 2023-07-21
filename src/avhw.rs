@@ -31,7 +31,7 @@ impl AvHwDevCtx {
                 opts.as_mut_ptr(),
                 0,
             );
-            assert_eq!(sts, 0);
+            assert_eq!(sts, 0, "failed to open {dri_device}");
 
             Self { ptr: hw_device_ctx }
         }

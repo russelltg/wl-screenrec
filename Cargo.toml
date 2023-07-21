@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "color", "usage", "error-context", "suggestions"] }
 wayland-client = "0.30"
-wayland-protocols = { version = "0.30", features = ["client", "unstable"] }
+wayland-protocols = { version = "0.30", features = ["client", "unstable", "staging"] }
 wayland-protocols-wlr = { version = "0.1", features = ["client"] }
 ffmpeg-next = "6.0.0"
 thiserror = "1.0.38"
@@ -16,6 +16,8 @@ drm-fourcc = "2.2.0"
 human-size = "0.4.2"
 signal-hook = "0.3.15"
 anyhow = "1.0.71"
+drm-sys = { version = "0.4.0", git = "https://github.com/russelltg/drm-rs", features = ["pkg-config"] }
+libc = "0.2.147"
 
 
 [dev-dependencies]
