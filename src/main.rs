@@ -81,7 +81,7 @@ mod platform {
         "which audio device to record from. list devices with `pactl list short sources`";
     pub const DEFAULT_AUDIO_BACKEND: &str = "pulse";
 }
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "dragonfly", target_os = "freebsd"))]
 mod platform {
     pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "/dev/dsp";
     pub const AUDIO_DEVICE_HELP: &str =
