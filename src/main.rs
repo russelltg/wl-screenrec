@@ -497,7 +497,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
-                                    println!("failed to create encoder: {}", e);
+                                    eprintln!("failed to create encoder: {}", e);
                                     state.quit_flag.store(true, Ordering::SeqCst);
                                     return;
                                 }
@@ -554,7 +554,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
-                println!("Failed to screencopy!");
+                eprintln!("Failed to screencopy!");
                 state.quit_flag.store(true, Ordering::SeqCst)
             }
             _ => {}
@@ -750,7 +750,7 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
                 let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
                 state.dri_device = Some(if ptr.is_null() {
                     eprintln!(
-                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128"
+                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
                     );
                     "/dev/dri/renderD128".to_owned()
                 } else {
@@ -966,7 +966,7 @@ impl State {
             (None, "") => {
                 // default case, capture whole monitor
                 if self.outputs.len() != 1 {
-                    println!("multiple displays and no --geometry or --output supplied, bailing");
+                    eprintln!("multiple displays and no --geometry or --output supplied, bailing");
                     self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -979,7 +979,7 @@ impl State {
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
                     (output, (0, 0), output.size_pixels)
                 } else {
-                    println!("display {} not found, bailing", disp);
+                    eprintln!("display {} not found, bailing", disp);
                     self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -1003,7 +1003,7 @@ impl State {
                         (output.logical_to_pixel(w), output.logical_to_pixel(h)),
                     )
                 } else {
-                    println!(
+                    eprintln!(
                         "region {},{} {}x{} is not entirely within one output, bailing",
                         x, y, w, h
                     );
@@ -1012,13 +1012,13 @@ impl State {
                 }
             }
             (Some(_), _) => {
-                println!("both --geometry and --output were passed, which is not allowed, bailing");
+                eprintln!("both --geometry and --output were passed, which is not allowed, bailing");
                 self.quit_flag.store(true, Ordering::SeqCst);
                 return;
             }
         };
 
-        println!("Using output {}", output.name);
+        eprintln!("Using output {}", output.name);
 
         self.wl_output = Some(output.output.clone());
         self.enc = EncConstructionStage::EverythingButFormat {
@@ -1137,11 +1137,11 @@ impl EncState {
                     if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
                         Some(codec)
                     } else {
-                        println!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
+                        eprintln!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
                         None
                     }
                 } else {
-                    println!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
+                    eprintln!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
                     None
                 }
             } else {
@@ -1221,7 +1221,7 @@ impl EncState {
             .unwrap();
 
         if args.verbose >= 1 {
-            println!("{}", video_filter.dump());
+            eprintln!("{}", video_filter.dump());
         }
 
         let enc = make_video_params(
@@ -1252,7 +1252,7 @@ impl EncState {
                 LowPowerMode::Auto => match enc.open_with(low_power_opts) {
                     Ok(enc) => enc,
                     Err(e) => {
-                        println!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder", e);
+                        eprintln!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning", e);
                         make_video_params(
                             args,
                             enc_pixfmt,
