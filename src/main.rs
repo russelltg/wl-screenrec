@@ -85,7 +85,7 @@ mod platform {
 mod platform {
     pub const DEFAULT_AUDIO_CAPTURE_DEVICE: &str = "/dev/dsp";
     pub const AUDIO_DEVICE_HELP: &str =
-        "which audio device to record from. list devices with `cat /dev/sndstat` (pcmN -> dspN)"
+        "which audio device to record from. list devices with `cat /dev/sndstat` (pcmN -> dspN)";
     pub const DEFAULT_AUDIO_BACKEND: &str = "oss";
 }
 use platform::*;
