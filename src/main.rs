@@ -740,7 +740,7 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
                     let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
                     state.dri_device = Some(if ptr.is_null() {
                         eprintln!(
-                            "drmGetDeviceFromFd2 returned null, guessing /dev/dri/renderD128"
+                            "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128"
                         );
                         "/dev/dri/renderD128".to_owned()
                     } else {
