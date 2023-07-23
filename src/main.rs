@@ -683,11 +683,8 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for State {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            zwlr_output_manager_v1::Event::Done { .. } => {
-                state.zwlr_ouptut_info_done(qhandle);
-            }
-            _ => {}
+        if let zwlr_output_manager_v1::Event::Done { .. } = event {
+            state.zwlr_ouptut_info_done(qhandle);
         }
     }
 
@@ -748,23 +745,20 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        match event {
-            wp_drm_lease_device_v1::Event::DrmFd { fd } => {
-                unsafe {
-                    let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
-                    state.dri_device = Some(if ptr.is_null() {
-                        eprintln!(
-                            "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128"
-                        );
-                        "/dev/dri/renderD128".to_owned()
-                    } else {
-                        let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
-                        libc::free(ptr as *mut _);
-                        ret
-                    });
-                };
-            }
-            _ => {}
+        if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
+            unsafe {
+                let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
+                state.dri_device = Some(if ptr.is_null() {
+                    eprintln!(
+                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128"
+                    );
+                    "/dev/dri/renderD128".to_owned()
+                } else {
+                    let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
+                    libc::free(ptr as *mut _);
+                    ret
+                });
+            };
         }
     }
 }
@@ -819,24 +813,21 @@ impl State {
 
         let dri_device = if let Some(dev) = &args.dri_device {
             Some(dev.clone())
-        } else {
-            if gm
-                .bind::<WpDrmLeaseDeviceV1, _, _>(
-                    &eq,
-                    WpDrmLeaseDeviceV1::interface().version
-                        ..=WpDrmLeaseDeviceV1::interface().version,
-                    (),
-                )
-                .is_err()
-            {
-                if args.verbose >= 1 {
-                    eprintln!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128");
-                }
-
-                Some("/dev/dri/renderD128".to_owned())
-            } else {
-                None // will be filled by the callback
+        } else if gm
+            .bind::<WpDrmLeaseDeviceV1, _, _>(
+                &eq,
+                WpDrmLeaseDeviceV1::interface().version..=WpDrmLeaseDeviceV1::interface().version,
+                (),
+            )
+            .is_err()
+        {
+            if args.verbose >= 1 {
+                eprintln!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128. pass --dri-device if this is incorrect or to suppress this warning");
             }
+
+            Some("/dev/dri/renderD128".to_owned())
+        } else {
+            None // will be filled by the callback
         };
 
         let mut partial_outputs = BTreeMap::new();
@@ -1205,7 +1196,7 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        let mut hw_device_ctx = AvHwDevCtx::new_libva(&dri_device);
+        let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
         let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .unwrap();
@@ -1338,7 +1329,7 @@ impl EncState {
                 .filter_map(|st| hist.iter().find(|p| p.stream() == st.index()))
                 .map(|packet| {
                     let tb = self.octx.stream(packet.stream()).unwrap().time_base();
-                    packet.pts().unwrap() as i64 * 1_000_000_000 * tb.0 as i64 / tb.1 as i64
+                    packet.pts().unwrap() * 1_000_000_000 * tb.0 as i64 / tb.1 as i64
                 })
                 .min()
                 .unwrap_or(0);

@@ -50,7 +50,7 @@ fn history_clip_length() {
     cmd.wait().unwrap();
     assert!(wait_start.elapsed() < Duration::from_secs(1));
 
-    let dur = file_duration(filename);
+    let dur = file_duration(&filename);
 
     // duration *should* be ~8 (2 seconds of history + 6 seconds after USER1)
     assert!(dur > Duration::from_secs(8), "{:?} < 8s", dur);
@@ -77,13 +77,13 @@ fn basic() {
     cmd.wait().unwrap();
     assert!(wait_start.elapsed() < Duration::from_secs(1));
 
-    let dur = file_duration(filename);
+    let dur = file_duration(&filename);
 
     assert!(dur > Duration::from_secs_f64(2.5), "{:?} < 2.5s", dur);
     assert!(dur < Duration::from_secs_f64(3.5), "{:?} > 3.5s", dur);
 }
 
-fn file_duration(filename: PathBuf) -> Duration {
+fn file_duration(filename: &Path) -> Duration {
     let json: Value = serde_json::from_str(
         &String::from_utf8(
             Command::new("ffprobe")
