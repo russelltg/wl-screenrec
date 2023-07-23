@@ -20,8 +20,6 @@ jobs:
       run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf
     - name: Install rust
       run: rustup install stable
-    - name: What CPU?
-      run: lscpu
     - uses: actions/checkout@v3
     - name: Build
       run: cargo build --verbose
