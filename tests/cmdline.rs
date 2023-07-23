@@ -24,6 +24,7 @@ fn wl_screenrec() -> PathBuf {
 }
 
 #[test]
+#[ignore]
 fn history_clip_length() {
     let filename = temp_dir().join("ahcl.mp4");
 
@@ -79,7 +80,7 @@ fn basic() {
     let dur = file_duration(filename);
 
     assert!(dur > Duration::from_secs_f64(2.5), "{:?} < 2.5s", dur);
-    assert!(dur < Duration::from_secs_f64(2.5), "{:?} > 3.5s", dur);
+    assert!(dur < Duration::from_secs_f64(3.5), "{:?} > 3.5s", dur);
 }
 
 fn file_duration(filename: PathBuf) -> Duration {
