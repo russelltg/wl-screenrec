@@ -165,6 +165,9 @@ pub struct Args {
 
     #[clap(long, default_value_t = DEFAULT_AUDIO_BACKEND.to_string(), help = "which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used")]
     audio_backend: String,
+
+    #[clap(long="no-damage", default_value = "true", action=ArgAction::SetFalse, help="copy every frame, not just unique frames. This can be helpful to get a non-variable framerate video, but is generally discouraged as it uses much more resources. Useful for testing")]
+    damage: bool,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -533,7 +536,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     (),
                 );
 
-                capture.copy_with_damage(&buf);
+                if state.args.damage {
+                    capture.copy_with_damage(&buf);
+                } else {
+                    capture.copy(&buf);
+                }
 
                 state.surfaces_owned_by_compositor.push_back((
                     surf,
