@@ -720,6 +720,11 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
     }
 }
 
+// from libdrm
+extern "C" {
+    pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
+}
+
 impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
     fn event(
         state: &mut Self,
@@ -732,7 +737,7 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
         match event {
             wp_drm_lease_device_v1::Event::DrmFd { fd } => {
                 unsafe {
-                    let ptr = drm_sys::drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
+                    let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
                     state.dri_device = Some(if ptr.is_null() {
                         eprintln!(
                             "drmGetDeviceFromFd2 returned null, guessing /dev/dri/renderD128"
