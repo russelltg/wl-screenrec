@@ -278,6 +278,7 @@ fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
     }
 }
 
+#[derive(Debug)]
 struct PartialOutputInfo {
     name: Option<String>,
     loc: Option<(i32, i32)>,
@@ -668,13 +669,19 @@ impl Dispatch<ZxdgOutputV1, u32> for State {
 
 impl Dispatch<ZwlrOutputManagerV1, ()> for State {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &ZwlrOutputManagerV1,
-        _event: <ZwlrOutputManagerV1 as Proxy>::Event,
+        event: <ZwlrOutputManagerV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
+        match event {
+            zwlr_output_manager_v1::Event::Done { .. } => {
+                state.zwlr_ouptut_info_done(qhandle);
+            }
+            _ => {}
+        }
     }
 
     event_created_child!(State, ZwlrOutputManagerV1, [
@@ -923,6 +930,25 @@ impl State {
                     self.start_if_output_probe_complete(qhandle);
                 }
             }
+        }
+    }
+
+    fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<State>) {
+        let keys = self.output_fractional_scales.keys().copied().collect::<Vec<_>>();
+        for k in keys {
+            self.update_output_info_zwlr_head(k, qhandle, |(name, scale)| {
+                if name.is_none() {
+                    eprintln!("compositor did not report output name, strange");
+                    *name = Some("<unknown>".to_owned());
+                }
+                if scale.is_none() {
+                    eprintln!(
+                        "compositor did not report scale for output {}, assuming one",
+                        name.as_deref().unwrap()
+                    );
+                    *scale = Some(1.);
+                }
+            });
         }
     }
 
