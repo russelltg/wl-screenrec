@@ -1012,7 +1012,9 @@ impl State {
                 }
             }
             (Some(_), _) => {
-                eprintln!("both --geometry and --output were passed, which is not allowed, bailing");
+                eprintln!(
+                    "both --geometry and --output were passed, which is not allowed, bailing"
+                );
                 self.quit_flag.store(true, Ordering::SeqCst);
                 return;
             }
