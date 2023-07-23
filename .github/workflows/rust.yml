@@ -17,7 +17,7 @@ jobs:
       image: archlinux:latest
     steps:
     - name: Install system deps
-      run: pacman  --noconfirm -Syu ffmpeg rustup
+      run: pacman  --noconfirm -Syu ffmpeg rustup gcc
     - name: Install rust
       run: rustup install stable
     - uses: actions/checkout@v3
