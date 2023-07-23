@@ -734,7 +734,7 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
     }
 }
 
-// from libdrm
+#[link(name = "drm")]
 extern "C" {
     pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
 }
