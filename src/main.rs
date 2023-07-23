@@ -941,7 +941,11 @@ impl State {
     }
 
     fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<State>) {
-        let keys = self.output_fractional_scales.keys().copied().collect::<Vec<_>>();
+        let keys = self
+            .output_fractional_scales
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
         for k in keys {
             self.update_output_info_zwlr_head(k, qhandle, |(name, scale)| {
                 if name.is_none() {
