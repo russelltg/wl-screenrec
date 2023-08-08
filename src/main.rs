@@ -6,6 +6,7 @@ use std::{
     mem::swap,
     num::ParseIntError,
     os::fd::AsRawFd,
+    process::exit,
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -41,7 +42,7 @@ use wayland_client::{
         wl_output::{self, Mode, WlOutput},
         wl_registry::WlRegistry,
     },
-    Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
+    ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
     wp::{
@@ -1627,7 +1628,17 @@ fn main() {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
     }
 
-    let conn = Connection::connect_to_env().unwrap();
+    let conn = match Connection::connect_to_env() {
+        Ok(conn) => conn,
+        Err(e @ ConnectError::NoCompositor) => {
+            eprintln!("WAYLAND_DISPLAY or XDG_RUNTIME_DIR environment variables are not set or are set to an invalid value: {e}");
+            exit(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1)
+        }
+    };
 
     let (mut state, mut queue) = State::new(&conn, args, quit_flag.clone(), sigusr1_flag);
 
