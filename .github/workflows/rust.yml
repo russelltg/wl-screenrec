@@ -27,7 +27,7 @@ jobs:
     - name: Format
       run: cargo fmt --check
     - name: Run tests
-      run: >
+      run: |
         XDG_RUNTIME_DIR=/tmp PATH=`pwd`/.github/scripts:$PATH WLR_RENDERER_ALLOW_SOFTWARE=true WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 sway -c .github/scripts/sway.cfg
         exit $(cat /tmp/test_exit_code)
 
