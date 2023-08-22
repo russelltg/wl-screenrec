@@ -18,7 +18,7 @@ jobs:
       options: --privileged
     steps:
     - name: Install system deps
-      run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf sway git mesa-utils
+      run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf sway git mesa-utils xorg-xwayland
     - name: Install rust
       run: rustup install stable
     - uses: actions/checkout@v3
