@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+      options: --privileged
     steps:
     - name: Install system deps
       run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf sway
