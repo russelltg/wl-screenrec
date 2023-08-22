@@ -18,7 +18,7 @@ jobs:
       options: --privileged
     steps:
     - name: Install system deps
-      run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf sway
+      run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf sway git
     - name: Install rust
       run: rustup install stable
     - uses: actions/checkout@v3
@@ -27,4 +27,7 @@ jobs:
     - name: Format
       run: cargo fmt --check
     - name: Run tests
-      run: XDG_RUNTIME_DIR=/tmp PATH=`pwd`/.github/scripts:$PATH WLR_RENDERER_ALLOW_SOFTWARE=true WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 sway -c .github/scripts/sway.cfg
+      run: >
+        XDG_RUNTIME_DIR=/tmp PATH=`pwd`/.github/scripts:$PATH WLR_RENDERER_ALLOW_SOFTWARE=true WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 sway -c .github/scripts/sway.cfg
+        exit $(cat /tmp/test_exit_code)
+
