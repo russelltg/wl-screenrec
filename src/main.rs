@@ -1218,7 +1218,7 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        eprintln!("Opening {dri_device} for vaapi...");
+        eprintln!("Opening libva device from DRM device {dri_device}");
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
         let mut frames_rgb = hw_device_ctx
