@@ -46,7 +46,10 @@ use wayland_client::{
 };
 use wayland_protocols::{
     wp::{
-        drm_lease::v1::client::wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
+        drm_lease::v1::client::{
+            wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1,
+            wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
+        },
         linux_dmabuf::zv1::client::{
             zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
             zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -762,6 +765,22 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
             };
         }
     }
+
+    event_created_child!(State, WpDrmLeaseDeviceV1, [
+        wp_drm_lease_device_v1::EVT_CONNECTOR_OPCODE => (WpDrmLeaseConnectorV1, ()),
+    ]);
+}
+
+impl Dispatch<WpDrmLeaseConnectorV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpDrmLeaseConnectorV1,
+        _event: <WpDrmLeaseConnectorV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
 }
 
 impl State {
@@ -1198,6 +1217,8 @@ impl EncState {
         }
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
+
+        eprintln!("Opening {dri_device} for vaapi...");
 
         let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
         let mut frames_rgb = hw_device_ctx
