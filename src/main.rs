@@ -5,7 +5,7 @@ use std::{
     ffi::{c_int, CStr},
     mem::swap,
     num::ParseIntError,
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, BorrowedFd},
     process::exit,
     str::from_utf8_unchecked,
     sync::{
@@ -519,7 +519,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
 
                 let modifier = desc.objects[0].format_modifier.to_be_bytes();
                 let stride = desc.layers[0].planes[0].pitch as u32;
-                let fd = desc.objects[0].fd;
+                let fd = unsafe { BorrowedFd::borrow_raw(desc.objects[0].fd) };
 
                 let dma_params = state.dma.create_params(qhandle, ());
                 dma_params.add(
