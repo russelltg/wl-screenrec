@@ -127,10 +127,10 @@ Options:
           geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output
   -o, --output <OUTPUT>
           Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
-  -v, --verbose
-          add very loud logging
+  -v, --verbose...
+          add very loud logging. can be specified multiple times
       --dri-device <DRI_DEVICE>
-          [default: /dev/dri/renderD128]
+          which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol, if present. if not present, /dev/dri/renderD128 is guessed
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
@@ -149,6 +149,10 @@ Options:
           which audio device to record from. list devices with `pactl list short sources` [default: default]
       --audio-backend <AUDIO_BACKEND>
           which ffmpeg audio capture backend (see https://ffmpeg.org/ffmpeg-devices.html`) to use. you almost certainally want to specify --audio-device if you use this, as the values depend on the backend used [default: pulse]
+      --no-damage
+          copy every frame, not just unique frames. This can be helpful to get a non-variable framerate video, but is generally discouraged as it uses much more resources. Useful for testing
+      --gop-size <GOP_SIZE>
+          GOP (group of pictures) size
   -h, --help
           Print help
   -V, --version
