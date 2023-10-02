@@ -1,0 +1,25 @@
+name: publish-crates
+run-name: wl-screenrec is publishing its crates
+
+on:
+  release:
+    types: [ published ] 
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+    publish:
+        name: Publish wl-screenrec
+        runs-on: ubuntu-latest
+        steps:
+          - uses: actions/checkout@v3
+          - uses: actions-rs/toolchain@v1
+            with:
+                toolchain: stable
+                override: true
+          - name: Publish wl-screenrec to crates.io
+            run: cargo publish --manifest-path ./Cargo.toml --token ${CRATES_TOKEN}
+            env:
+              CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+   
