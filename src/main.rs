@@ -172,6 +172,9 @@ pub struct Args {
 
     #[clap(long="no-damage", default_value = "true", action=ArgAction::SetFalse, help="copy every frame, not just unique frames. This can be helpful to get a non-variable framerate video, but is generally discouraged as it uses much more resources. Useful for testing")]
     damage: bool,
+
+    #[clap(long = "gop-size", help = "GOP (group of pictures) size")]
+    gop_size: Option<u32>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -1104,6 +1107,9 @@ fn make_video_params(
     enc.set_height(encode_h as u32);
     enc.set_time_base(Rational(1, 1_000_000_000));
     enc.set_frame_rate(Some(framerate));
+    if let Some(gop) = args.gop_size {
+        enc.set_gop(gop);
+    }
 
     if global_header {
         enc.set_flags(codec::Flags::GLOBAL_HEADER);
