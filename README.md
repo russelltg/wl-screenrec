@@ -41,6 +41,8 @@ but still not a huge change.
 ## From the AUR
 
 ```bash
+paru -S wl-screenrec
+# OR
 paru -S wl-screenrec-git
 ```
 Or, manually:
@@ -55,7 +57,9 @@ makepkg -si
 Install ffmpeg, which is a required dependency.
 
 ```bash
-cargo install --git https://github.com/russelltg/wl-screenrec
+cargo install wl-screenrec # stable version
+# OR
+cargo install --git https://github.com/russelltg/wl-screenrec # git version
 ```
 
 ## FreeBSD
