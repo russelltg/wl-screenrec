@@ -1,5 +1,9 @@
 [package]
 name = "wl-screenrec"
+description = "High performance screen/audio recorder for wlroots"
+license-file = "LICENSE"
+homepage = "https://github.com/russelltg/wl-screenrec"
+repository = "https://github.com/russelltg/wl-screenrec"
 version = "0.1.0"
 edition = "2021"
 
