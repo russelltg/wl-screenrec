@@ -24,14 +24,14 @@ use crate::{fifo::AudioFifo, Args};
 struct AudioState {
     enc_audio: encoder::Audio,
     ist_stream_idx: usize,
-    audio_stream_time_base: Rational,
+    ist_time_base: Rational,
     dec_audio: decoder::Audio,
     frame_sender: Sender<Packet>,
 
     audio_filter: filter::Graph,
 
-    ost_audio_idx: usize,
-    ost_audio_time_base: Rational,
+    ost_idx: usize,
+    ost_time_base: Rational,
 
     flush_flag: Arc<AtomicBool>,
     fifo: Option<AudioFifo>,
@@ -53,11 +53,12 @@ pub struct IncompleteAudioState {
 
     enc_audio: encoder::Audio,
     ost_stream_idx: usize,
+    ist_time_base: Rational,
 }
 
 impl AudioState {
     fn thread(mut self, mut audio_input: Input) {
-        assert_ne!(self.ost_audio_time_base, Rational::new(0, 0));
+        assert_ne!(self.ost_time_base, Rational::new(0, 0));
 
         for (stream, mut packet) in audio_input.packets() {
             if !self.started.load(Ordering::SeqCst) {
@@ -65,7 +66,7 @@ impl AudioState {
             }
 
             if stream.index() == self.ist_stream_idx {
-                packet.rescale_ts(self.audio_stream_time_base, self.dec_audio.time_base());
+                packet.rescale_ts(self.ist_time_base, self.dec_audio.time_base());
                 self.dec_audio.send_packet(&packet).unwrap();
                 self.pop_from_decoder();
                 self.pop_from_filter();
@@ -75,6 +76,18 @@ impl AudioState {
                 self.flush();
                 return;
             }
+        }
+    }
+
+    fn pop_from_decoder(&mut self) {
+        let mut frame = frame::Audio::empty();
+        while self.dec_audio.receive_frame(&mut frame).is_ok() {
+            self.audio_filter
+                .get("in")
+                .unwrap()
+                .source()
+                .add(&frame)
+                .unwrap();
         }
     }
 
@@ -114,18 +127,6 @@ impl AudioState {
         self.fifo.as_mut()
     }
 
-    fn pop_from_decoder(&mut self) {
-        let mut frame = frame::Audio::empty();
-        while self.dec_audio.receive_frame(&mut frame).is_ok() {
-            self.audio_filter
-                .get("in")
-                .unwrap()
-                .source()
-                .add(&frame)
-                .unwrap();
-        }
-    }
-
     fn flush(&mut self) {
         self.dec_audio.send_eof().unwrap();
         self.pop_from_decoder();
@@ -143,8 +144,11 @@ impl AudioState {
     fn pop_frames_from_encoder(&mut self) {
         let mut pack = Packet::empty();
         while self.enc_audio.receive_packet(&mut pack).is_ok() {
-            pack.set_stream(self.ost_audio_idx);
-            pack.rescale_ts(self.dec_audio.time_base(), self.ost_audio_time_base);
+            pack.set_stream(self.ost_idx);
+            pack.rescale_ts(
+                Rational::new(1, self.enc_audio.rate() as i32),
+                self.ost_time_base,
+            );
             self.frame_sender
                 .send(pack)
                 .expect("Strange, main thread exited before issuing flush");
@@ -227,6 +231,7 @@ impl AudioHandle {
 
         Ok(IncompleteAudioState {
             ist_stream_idx: best_audio_stream.index(),
+            ist_time_base: best_audio_stream.time_base(),
             ost_stream_idx: ost_audio.index(),
             enc_audio,
             dec_audio,
@@ -249,7 +254,7 @@ impl AudioHandle {
 
 impl IncompleteAudioState {
     pub fn finish(self, _args: &Args, octx: &format::context::Output) -> AudioHandle {
-        let audio_stream_time_base = octx.stream(self.ost_stream_idx).unwrap().time_base();
+        let ost_time_base = octx.stream(self.ost_stream_idx).unwrap().time_base();
 
         let mut fifo = None;
         if let Some(codec) = self.enc_audio.codec() {
@@ -286,11 +291,11 @@ impl IncompleteAudioState {
             enc_audio: self.enc_audio,
             // audio_input,
             ist_stream_idx: self.ist_stream_idx,
-            audio_stream_time_base,
+            ist_time_base: self.ist_time_base,
             dec_audio: self.dec_audio,
             frame_sender,
-            ost_audio_idx: self.ost_stream_idx,
-            ost_audio_time_base: audio_stream_time_base,
+            ost_idx: self.ost_stream_idx,
+            ost_time_base,
             audio_filter,
             flush_flag: flush_flag.clone(),
             fifo,
