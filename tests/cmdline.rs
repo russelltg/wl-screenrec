@@ -24,20 +24,20 @@ fn wl_screenrec() -> PathBuf {
 }
 
 #[test]
-#[ignore]
 fn history_clip_length() {
     let filename = temp_dir().join("ahcl.mp4");
 
     let mut cmd = Command::new(dbg!(wl_screenrec()))
         .arg("--no-damage")
-        .arg("--history")
-        .arg("2")
+        .arg("--audio")
+        .arg("--gop-size=5")
+        .arg("--history=2")
         .arg("-f")
         .arg(&filename)
         .spawn()
         .unwrap();
 
-    sleep(Duration::from_secs(5));
+    sleep(Duration::from_secs(10));
 
     let pid = Pid::from_raw(cmd.id() as i32);
     kill(pid, SIGUSR1).unwrap();
@@ -51,6 +51,7 @@ fn history_clip_length() {
     assert!(wait_start.elapsed() < Duration::from_secs(1));
 
     let dur = file_duration(&filename);
+    println!("dur={dur:?}");
 
     // duration *should* be ~8 (2 seconds of history + 6 seconds after USER1)
     assert!(dur > Duration::from_secs(8), "{:?} < 8s", dur);
