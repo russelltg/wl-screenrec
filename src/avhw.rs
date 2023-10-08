@@ -15,7 +15,7 @@ pub struct AvHwDevCtx {
 }
 
 impl AvHwDevCtx {
-    pub fn new_libva(dri_device: &str) -> Self {
+    pub fn new_libva(dri_device: &str) -> Result<Self, ffmpeg::Error> {
         unsafe {
             let mut hw_device_ctx = null_mut();
 
@@ -31,9 +31,12 @@ impl AvHwDevCtx {
                 opts.as_mut_ptr(),
                 0,
             );
-            assert_eq!(sts, 0, "failed to open {dri_device}");
 
-            Self { ptr: hw_device_ctx }
+            if sts != 0 {
+                Err(ffmpeg::Error::from(sts))
+            } else {
+                Ok(Self { ptr: hw_device_ctx })
+            }
         }
     }
 

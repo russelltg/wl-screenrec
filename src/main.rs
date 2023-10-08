@@ -1226,7 +1226,10 @@ impl EncState {
 
         eprintln!("Opening libva device from DRM device {dri_device}");
 
-        let mut hw_device_ctx = AvHwDevCtx::new_libva(dri_device);
+        let mut hw_device_ctx = match AvHwDevCtx::new_libva(dri_device) {
+            Ok(hdc) => hdc,
+            Err(e) => bail!("Failed to load vaapi device: {e}\nThis is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d /dev/dri/card0` works."),
+        };
         let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .unwrap();
