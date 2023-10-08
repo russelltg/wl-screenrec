@@ -829,7 +829,7 @@ impl State {
         let _wlr_output_man: ZwlrOutputManagerV1 = gm
             .bind(
                 &eq,
-                ZwlrOutputManagerV1::interface().version..=ZwlrOutputManagerV1::interface().version,
+                1..=4,
                 (),
             )
             .expect("Your compositor does not seem to support the wlr-output-manager protocol. wl-screenrec requires a wlroots based compositor like sway or Hyprland");
