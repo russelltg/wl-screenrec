@@ -143,7 +143,7 @@ pub struct Args {
         long,
         help = "Which ffmpeg muxer to use. Guessed from output filename by default"
     )]
-    muxer: Option<String>,
+    ffmpeg_muxer: Option<String>,
 
     #[clap(
         long,
@@ -1149,7 +1149,7 @@ impl EncState {
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &str,
     ) -> anyhow::Result<Self> {
-        let mut octx = if let Some(muxer) = &args.muxer {
+        let mut octx = if let Some(muxer) = &args.ffmpeg_muxer {
             ffmpeg_next::format::output_as(&args.filename, &muxer).unwrap()
         } else {
             ffmpeg_next::format::output(&args.filename).unwrap()
