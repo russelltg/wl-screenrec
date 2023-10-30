@@ -141,6 +141,12 @@ pub struct Args {
 
     #[clap(
         long,
+        help = "Which ffmpeg muxer to use. Guessed from output filename by default"
+    )]
+    muxer: Option<String>,
+
+    #[clap(
+        long,
         value_enum,
         help = "Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be"
     )]
@@ -1143,7 +1149,11 @@ impl EncState {
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &str,
     ) -> anyhow::Result<Self> {
-        let mut octx = ffmpeg_next::format::output(&args.filename).unwrap();
+        let mut octx = if let Some(muxer) = &args.muxer {
+            ffmpeg_next::format::output_as(&args.filename, &muxer).unwrap()
+        } else {
+            ffmpeg_next::format::output(&args.filename).unwrap()
+        };
 
         let codec = if let Some(encoder) = &args.ffmpeg_encoder {
             ffmpeg_next::encoder::find_by_name(encoder).ok_or_else(|| {
