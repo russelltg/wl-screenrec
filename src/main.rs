@@ -1197,26 +1197,31 @@ impl EncState {
             }
         };
 
-        let codec_id = codec.id();
-
         let supported_formats = supported_formats(&codec);
-        if supported_formats.is_empty() {
-            bail!(
-                "Encoder {} does not support any pixel formats?",
-                codec.name()
-            );
-        }
-
-        let enc_pixfmt = if supported_formats.contains(&Pixel::VAAPI) {
-            EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
-        } else {
+        let enc_pixfmt = if supported_formats.is_empty() {
             match args.encode_pixfmt {
-                None => EncodePixelFormat::Sw(supported_formats[0]),
-                Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
-                Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
+                Some(fmt) => EncodePixelFormat::Sw(fmt),
+                None => {
+                    eprintln!(
+                        "codec \"{}\" does not advertize supported pixel formats, just using NV12. Pass --encode-pixfmt to suppress this warning",
+                        codec.name()
+                    );
+                    EncodePixelFormat::Sw(Pixel::NV12)
+                }
+            }
+        } else {
+            if supported_formats.contains(&Pixel::VAAPI) {
+                EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
+            } else {
+                match args.encode_pixfmt {
+                    None => EncodePixelFormat::Sw(supported_formats[0]),
+                    Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
+                    Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
+                }
             }
         };
 
+        let codec_id = codec.id();
         if unsafe {
             avformat_query_codec(
                 octx.format().as_ptr(),
