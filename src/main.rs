@@ -135,7 +135,7 @@ pub struct Args {
         long,
         value_enum,
         default_value_t,
-        help = "which codec to use. Used in conjunction with --no-hw to determinte which enocder to use. Ignored if `encoder` is supplied"
+        help = "which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied"
     )]
     codec: Codec,
 
