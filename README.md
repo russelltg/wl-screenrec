@@ -138,7 +138,7 @@ Options:
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
-          which codec to use. Used in conjunction with --no-hw to determinte which enocder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9]
+          which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9]
       --ffmpeg-encoder <FFMPEG_ENCODER>
           Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be
       --encode-pixfmt <ENCODE_PIXFMT>
