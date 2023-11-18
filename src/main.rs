@@ -32,7 +32,7 @@ use ffmpeg::{
     media, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
-use signal_hook::consts::{SIGINT, SIGUSR1, SIGTERM};
+use signal_hook::consts::{SIGINT, SIGTERM, SIGUSR1};
 use thiserror::Error;
 use wayland_client::{
     event_created_child,
