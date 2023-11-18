@@ -1580,6 +1580,8 @@ fn video_filter(
     g.add(
         &filter::find("buffer").unwrap(),
         "in",
+        // format is bogus, will be replaced below, as we need to pass
+        // hw_frames_ctx which isn't possible with args=
         &format!(
             "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
             AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
