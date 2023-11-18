@@ -41,3 +41,6 @@ nix = { version = "0.27.1", default-features = false, features = [
     "process",
 ] }
 serde_json = "1.0.103"
+
+[profile.release]
+lto = "thin"
