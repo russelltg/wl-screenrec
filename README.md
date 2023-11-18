@@ -139,10 +139,14 @@ Options:
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
           which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9]
+      --ffmpeg-muxer <FFMPEG_MUXER>
+          Which ffmpeg muxer to use. Guessed from output filename by default
       --ffmpeg-encoder <FFMPEG_ENCODER>
           Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be
       --encode-pixfmt <ENCODE_PIXFMT>
           which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10
+      --encode-resolution <ENCODE_RESOLUTION>
+          what resolution to encode at. example: 1920x1080. Default is the resolution of the captured region. If your goal is reducing filesize, it's suggested to try --bitrate/-b first
   -b, --bitrate <BITRATE>
           bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps [default: "5 MB"]
       --history <HISTORY>

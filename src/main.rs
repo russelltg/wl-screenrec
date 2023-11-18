@@ -158,6 +158,9 @@ pub struct Args {
     )]
     encode_pixfmt: Option<Pixel>,
 
+    #[clap(long, value_parser=parse_size, help="what resolution to encode at. example: 1920x1080. Default is the resolution of the captured region. If your goal is reducing filesize, it's suggested to try --bitrate/-b first")]
+    encode_resolution: Option<(u32, u32)>,
+
     #[clap(long, short, default_value_t=SpecificSize::new(5, Megabyte).unwrap().into(), help="bitrate to encode at. Unit is bytes per second, so 5 MB is 40 Mbps")]
     bitrate: Size,
 
@@ -229,6 +232,13 @@ fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
         return Err(Location);
     }
 
+    let (sizex, sizey) = parse_size(size)?;
+
+    Ok((startx, starty, sizex, sizey))
+}
+
+fn parse_size(size: &str) -> Result<(u32, u32), ParseGeometryError> {
+    use ParseGeometryError::*;
     let mut it = size.split('x');
     let sizex = it.next().ok_or(Size)?.parse()?;
     let sizey = it.next().ok_or(Size)?.parse()?;
@@ -236,7 +246,7 @@ fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
         return Err(Size);
     }
 
-    Ok((startx, starty, sizex, sizey))
+    Ok((sizex, sizey))
 }
 
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
@@ -1144,8 +1154,8 @@ impl EncState {
         capture_pixfmt: Pixel,
         refresh: Rational,
         (capture_w, capture_h): (i32, i32), // pixels
-        (encode_x, encode_y): (i32, i32),
-        (encode_w, encode_h): (i32, i32),
+        (roi_x, roi_y): (i32, i32),
+        (roi_w, roi_h): (i32, i32),
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &str,
     ) -> anyhow::Result<Self> {
@@ -1249,12 +1259,18 @@ impl EncState {
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .unwrap();
 
+        let (enc_w, enc_h) = match args.encode_resolution {
+            Some((x, y)) => (x as i32, y as i32),
+            None => (roi_w, roi_h),
+        };
+
         let (video_filter, filter_timebase) = video_filter(
             &mut frames_rgb,
             enc_pixfmt,
             (capture_w, capture_h),
-            (encode_x, encode_y),
-            (encode_w, encode_h),
+            (roi_x, roi_y),
+            (roi_w, roi_h),
+            (enc_w, enc_h),
         );
 
         let mut frames_yuv = hw_device_ctx
@@ -1263,8 +1279,8 @@ impl EncState {
                     EncodePixelFormat::Vaapi(fmt) => fmt,
                     EncodePixelFormat::Sw(fmt) => fmt,
                 },
-                encode_w,
-                encode_h,
+                enc_w,
+                enc_h,
             )
             .unwrap();
 
@@ -1276,7 +1292,7 @@ impl EncState {
             args,
             enc_pixfmt,
             &codec,
-            (encode_w, encode_h),
+            (enc_w, enc_h),
             refresh,
             global_header,
             &mut hw_device_ctx,
@@ -1305,7 +1321,7 @@ impl EncState {
                             args,
                             enc_pixfmt,
                             &codec,
-                            (encode_w, encode_h),
+                            (enc_w, enc_h),
                             refresh,
                             global_header,
                             &mut hw_device_ctx,
@@ -1558,8 +1574,9 @@ fn video_filter(
     inctx: &mut AvHwFrameCtx,
     pix_fmt: EncodePixelFormat,
     (capture_width, capture_height): (i32, i32),
-    (enc_x, enc_y): (i32, i32),
-    (enc_width, enc_height): (i32, i32),
+    (roi_x, roi_y): (i32, i32),
+    (roi_w, roi_h): (i32, i32), // size (pixels) of the region to capture
+    (enc_w, enc_h): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
@@ -1616,14 +1633,7 @@ fn video_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={}:{}:{}:{},scale_vaapi=format={}:w={}:h={}{}",
-            enc_width,
-            enc_height,
-            enc_x,
-            enc_y,
-            output_real_pixfmt_name,
-            enc_width,
-            enc_height,
+            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y},scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{}",
             if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
