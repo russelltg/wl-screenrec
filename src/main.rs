@@ -32,7 +32,7 @@ use ffmpeg::{
     media, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
-use signal_hook::consts::{SIGINT, SIGUSR1};
+use signal_hook::consts::{SIGINT, SIGUSR1, SIGTERM};
 use thiserror::Error;
 use wayland_client::{
     event_created_child,
@@ -1666,6 +1666,7 @@ fn main() {
     let sigusr1_flag = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register(SIGINT, Arc::clone(&quit_flag)).unwrap();
+    signal_hook::flag::register(SIGTERM, Arc::clone(&quit_flag)).unwrap();
     signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
 
     let args = Args::parse();
