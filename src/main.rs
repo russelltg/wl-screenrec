@@ -1160,7 +1160,7 @@ impl EncState {
         dri_device: &str,
     ) -> anyhow::Result<Self> {
         let mut octx = if let Some(muxer) = &args.ffmpeg_muxer {
-            ffmpeg_next::format::output_as(&args.filename, &muxer).unwrap()
+            ffmpeg_next::format::output_as(&args.filename, muxer).unwrap()
         } else {
             ffmpeg_next::format::output(&args.filename).unwrap()
         };
@@ -1219,15 +1219,13 @@ impl EncState {
                     EncodePixelFormat::Sw(Pixel::NV12)
                 }
             }
+        } else if supported_formats.contains(&Pixel::VAAPI) {
+            EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
         } else {
-            if supported_formats.contains(&Pixel::VAAPI) {
-                EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
-            } else {
-                match args.encode_pixfmt {
-                    None => EncodePixelFormat::Sw(supported_formats[0]),
-                    Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
-                    Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
-                }
+            match args.encode_pixfmt {
+                None => EncodePixelFormat::Sw(supported_formats[0]),
+                Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
+                Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
             }
         };
 
