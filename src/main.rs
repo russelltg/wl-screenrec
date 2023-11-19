@@ -1628,12 +1628,15 @@ fn video_filter(
         )
     };
 
+    // exact=1 should not be necessary, as the input is not chroma-subsampled
+    // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
+    // it is harmless to add though, so keep it as a workaround
     g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y},scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{}",
+            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{}",
             if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
