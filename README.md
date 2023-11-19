@@ -54,7 +54,9 @@ makepkg -si
 
 ## From source using cargo
 
-Install ffmpeg, which is a required dependency.
+Install ffmpeg 6 or later, which is a required dependency.
+ffmpeg 5 may work, but is untested (open an issue or PR if you test with ffmpeg 5
+so I can update these docs on if it works or not)
 
 ```bash
 cargo install wl-screenrec # stable version
