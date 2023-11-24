@@ -111,11 +111,19 @@ wl-screenrec --audio                                                            
 wl-screenrec --audio --audio-device alsa_output.pci-0000_00_1f.3.hdmi-stereo.monitor # capture desktop audio (example, use `pactl list short sources` to figure out what you should put here)
 ```
 
-Record with history
+Record with history:
 ```bash
 wl-screenrec --history 10 & # record the most recent 10 seconds into memory, not writing into the file
 # ... some important event occurs
 killall -USR1 wl-screenrec  # flush the most recent 10 seconds onto the file, and start appending to the file like recording normally
+```
+
+Capture to [v4l2loopback](https://github.com/umlaeute/v4l2loopback) (for Zoom, etc):
+
+```bash
+sudo modprobe v4l2loopback
+v4l2-ctl --list-devices # find "Dummy video device" device. /dev/video6 in my case.
+wl-screenrec --ffmpeg-muxer v4l2 -f /dev/video6
 ```
 
 # All options
