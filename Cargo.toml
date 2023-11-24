@@ -26,7 +26,9 @@ wayland-protocols = { version = "0.31", features = [
     "staging",
 ] }
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
-ffmpeg-next = "6.0.0"
+
+# ffmpeg-next does not support ffmpeg 6.1 yet, so grab from the 6.1 PR
+ffmpeg-next = { git = "https://github.com/zmwangx/rust-ffmpeg", rev = "24ccb76c8c99d1dd53addb1d4056aed450138567" }
 thiserror = "1.0.38"
 drm-fourcc = "2.2.0"
 human-size = "0.4.2"
@@ -44,3 +46,7 @@ serde_json = "1.0.103"
 
 [profile.release]
 lto = "thin"
+
+# seee above
+[patch.crates-io]
+ffmpeg-sys-next = { git = "https://github.com/AdrianEddy/rust-ffmpeg-sys", rev = "f58d6f20afa3859f8b3aa00b064a5336f641e63e" }
