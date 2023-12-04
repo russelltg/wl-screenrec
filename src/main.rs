@@ -108,8 +108,8 @@ pub struct Args {
     )]
     filename: String,
 
-    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output")]
-    geometry: Option<(u32, u32, u32, u32)>,
+    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output", allow_hyphen_values=true)]
+    geometry: Option<(i32, i32, u32, u32)>,
 
     #[clap(
         long,
@@ -216,7 +216,7 @@ enum ParseGeometryError {
     Size,
 }
 
-fn parse_geometry(s: &str) -> Result<(u32, u32, u32, u32), ParseGeometryError> {
+fn parse_geometry(s: &str) -> Result<(i32, i32, u32, u32), ParseGeometryError> {
     use ParseGeometryError::*;
     let mut it = s.split(' ');
     let loc = it.next().ok_or(Structure)?;
@@ -1024,8 +1024,6 @@ impl State {
                 }
             }
             (Some((x, y, w, h)), "") => {
-                let x = x as i32;
-                let y = y as i32;
                 let w = w as i32;
                 let h = h as i32;
                 // --geometry but no --output
