@@ -108,7 +108,7 @@ pub struct Args {
     )]
     filename: String,
 
-    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output", allow_hyphen_values=true)]
+    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output", allow_hyphen_values=true)]
     geometry: Option<(i32, i32, u32, u32)>,
 
     #[clap(
@@ -1014,7 +1014,7 @@ impl State {
                 (output, (0, 0), output.size_pixels)
             }
             (None, disp) => {
-                // --output but no --geoemetry
+                // --output but no --geometry
                 if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
                     (output, (0, 0), output.size_pixels)
                 } else {
