@@ -148,7 +148,7 @@ Options:
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
-          which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9]
+          which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9, av1]
       --ffmpeg-muxer <FFMPEG_MUXER>
           Which ffmpeg muxer to use. Guessed from output filename by default
       --ffmpeg-encoder <FFMPEG_ENCODER>

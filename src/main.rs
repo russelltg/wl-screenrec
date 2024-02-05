@@ -194,6 +194,7 @@ enum Codec {
     Hevc,
     VP8,
     VP9,
+    AV1,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]
@@ -1096,6 +1097,7 @@ fn vaapi_codec_id(codec: codec::Id) -> Option<&'static str> {
         codec::Id::H265 | codec::Id::HEVC => Some("hevc_vaapi"),
         codec::Id::VP8 => Some("vp8_vaapi"),
         codec::Id::VP9 => Some("vp9_vaapi"),
+        codec::Id::AV1 => Some("av1_vaapi"),
         _ => None,
     }
 }
@@ -1176,6 +1178,7 @@ impl EncState {
                 Codec::Hevc => codec::Id::HEVC,
                 Codec::VP8 => codec::Id::VP8,
                 Codec::VP9 => codec::Id::VP9,
+                Codec::AV1 => codec::Id::AV1,
             };
 
             let maybe_hw_codec = if args.hw {
