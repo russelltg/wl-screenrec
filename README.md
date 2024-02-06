@@ -138,7 +138,7 @@ Options:
   -f, --filename <FILENAME>
           filename to write to. container type is detected from extension [default: screenrecord.mp4]
   -g, --geometry <GEOMETRY>
-          geometry to capture, format x,y WxH. Compatiable with the output of `slurp`. Mutually exclusive with --output
+          geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output
   -o, --output <OUTPUT>
           Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
   -v, --verbose...
@@ -148,7 +148,7 @@ Options:
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
-          which codec to use. Used in conjunction with --no-hw to determine which encoder to use. Ignored if `encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9, av1]
+          which video codec to use. Ignored if `--ffmpeg-encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9, av1]
       --ffmpeg-muxer <FFMPEG_MUXER>
           Which ffmpeg muxer to use. Guessed from output filename by default
       --ffmpeg-encoder <FFMPEG_ENCODER>
