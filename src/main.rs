@@ -17,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, format_err};
+use anyhow::{bail, format_err, Context};
 use audio::AudioHandle;
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
@@ -1314,7 +1314,7 @@ impl EncState {
         };
         let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
-            .unwrap();
+            .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {capture_w}x{capture_h}"))?;
 
         let (enc_w, enc_h) = match args.encode_resolution {
             Some((x, y)) => (x as i32, y as i32),
@@ -1330,16 +1330,15 @@ impl EncState {
             (enc_w, enc_h),
         );
 
+        let enc_pixfmt_av = match enc_pixfmt {
+            EncodePixelFormat::Vaapi(fmt) => fmt,
+            EncodePixelFormat::Sw(fmt) => fmt,
+        };
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(
-                match enc_pixfmt {
-                    EncodePixelFormat::Vaapi(fmt) => fmt,
-                    EncodePixelFormat::Sw(fmt) => fmt,
-                },
-                enc_w,
-                enc_h,
-            )
-            .unwrap();
+            .create_frame_ctx(enc_pixfmt_av, enc_w, enc_h)
+            .with_context(|| {
+                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {capture_w}x{capture_h}")
+            })?;
 
         if args.verbose >= 1 {
             eprintln!("{}", video_filter.dump());
@@ -1376,7 +1375,7 @@ impl EncState {
                         eprintln!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning", e);
                         make_video_params(
                             args,
-                            enc_pixfmt,
+                            enc_pixfmt_av,
                             &codec,
                             (enc_w, enc_h),
                             refresh,
