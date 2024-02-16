@@ -848,37 +848,23 @@ impl State {
         let eq: QueueHandle<State> = queue.handle();
 
         let man: ZwlrScreencopyManagerV1 = gm
-            .bind(
-                &eq,
-                ZwlrScreencopyManagerV1::interface().version
-                    ..=ZwlrScreencopyManagerV1::interface().version,
-                (),
-            )
+            .bind(&eq, 3..=ZwlrScreencopyManagerV1::interface().version, ())
             .unwrap();
-
         let dma: ZwpLinuxDmabufV1 = gm
-            .bind(
-                &eq,
-                ZwpLinuxDmabufV1::interface().version..=ZwpLinuxDmabufV1::interface().version,
-                (),
-            )
+            .bind(&eq, 4..=ZwpLinuxDmabufV1::interface().version, ())
             .unwrap();
 
         let registry = display.get_registry(&eq, ());
 
         let xdg_output_man: ZxdgOutputManagerV1 = gm
-            .bind(
-                &eq,
-                ZxdgOutputManagerV1::interface().version..=ZxdgOutputManagerV1::interface().version,
-                (),
-            )
+            .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
             .unwrap();
 
         // bind to get events so we can get the fractional scale
         let _wlr_output_man: ZwlrOutputManagerV1 = gm
             .bind(
                 &eq,
-                1..=4,
+                1..=ZwlrOutputManagerV1::interface().version,
                 (),
             )
             .expect("Your compositor does not seem to support the wlr-output-manager protocol. wl-screenrec requires a wlroots based compositor like sway or Hyprland");
