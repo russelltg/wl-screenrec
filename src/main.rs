@@ -1375,7 +1375,7 @@ impl EncState {
                         eprintln!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning", e);
                         make_video_params(
                             args,
-                            enc_pixfmt_av,
+                            enc_pixfmt,
                             &codec,
                             (enc_w, enc_h),
                             refresh,
