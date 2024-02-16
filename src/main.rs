@@ -1,8 +1,9 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{HashMap, VecDeque},
     ffi::{c_int, CStr},
+    marker::PhantomData,
     mem::swap,
     num::ParseIntError,
     os::fd::{AsRawFd, BorrowedFd},
@@ -35,6 +36,7 @@ use human_size::{Byte, Megabyte, Size, SpecificSize};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use thiserror::Error;
 use wayland_client::{
+    backend::ObjectId,
     event_created_child,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
@@ -313,6 +315,7 @@ struct PartialOutputInfo {
     size_pixels: Option<(i32, i32)>,
     refresh: Option<Rational>,
     output: WlOutput,
+    has_recvd_done: bool,
 }
 impl PartialOutputInfo {
     fn complete(&self, fractional_scale: f64) -> Option<OutputInfo> {
@@ -355,6 +358,22 @@ impl OutputInfo {
     }
 }
 
+#[derive(Default)]
+struct PartialOutputInfoWlr {
+    name: Option<String>,
+    scale: Option<f64>,
+    enabled: Option<bool>,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+struct TypedObjectId<T>(ObjectId, PhantomData<T>);
+
+impl<T> TypedObjectId<T> {
+    fn new(from: &impl Proxy) -> Self {
+        TypedObjectId(from.id(), Default::default())
+    }
+}
+
 struct State {
     surfaces_owned_by_compositor: VecDeque<(
         frame::Video,
@@ -370,9 +389,9 @@ struct State {
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
-    output_fractional_scales: BTreeMap<u32, (Option<String>, Option<f64>)>, // key is zwlr_output_head name (object ID) -> (name property, fractional scale)
-    partial_outputs: BTreeMap<u32, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
-    outputs: BTreeMap<u32, OutputInfo>,
+    partial_outputs_wlr: HashMap<TypedObjectId<ZwlrOutputHeadV1>, PartialOutputInfoWlr>,
+    partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
+    outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
     quit_flag: Arc<AtomicBool>,
     sigusr1_flag: Arc<AtomicBool>,
     dri_device: Option<String>,
@@ -634,28 +653,34 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-impl Dispatch<WlOutput, u32> for State {
+impl Dispatch<WlOutput, ()> for State {
     fn event(
         state: &mut Self,
-        _proxy: &WlOutput,
+        proxy: &WlOutput,
         event: <WlOutput as Proxy>::Event,
-        data: &u32,
+        _data: &(),
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if let wl_output::Event::Mode {
-            refresh,
-            flags: WEnum::Value(flags),
-            width,
-            height,
-        } = event
-        {
-            if flags.contains(Mode::Current) {
-                state.update_output_info_wl_output(*data, qhandle, |info| {
-                    info.refresh = Some(Rational(refresh, 1000));
-                    info.size_pixels = Some((width, height));
-                });
+        let id = TypedObjectId::new(proxy);
+        match event {
+            wl_output::Event::Mode {
+                refresh,
+                flags: WEnum::Value(flags),
+                width,
+                height,
+            } => {
+                if flags.contains(Mode::Current) {
+                    state.update_output_info_wl_output(&id, |info| {
+                        info.refresh = Some(Rational(refresh, 1000));
+                        info.size_pixels = Some((width, height));
+                    });
+                }
             }
+            wl_output::Event::Done => {
+                state.done_output_info_wl_output(id, qhandle);
+            }
+            _ => (),
         }
     }
 }
@@ -672,24 +697,28 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
     }
 }
 
-impl Dispatch<ZxdgOutputV1, u32> for State {
+impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
     fn event(
         state: &mut Self,
         _proxy: &ZxdgOutputV1,
         event: <ZxdgOutputV1 as Proxy>::Event,
-        data: &u32,
+        out_id: &TypedObjectId<WlOutput>,
         _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
         match event {
             zxdg_output_v1::Event::Name { name } => {
-                state.update_output_info_wl_output(*data, qhandle, |info| info.name = Some(name));
+                state.update_output_info_wl_output(out_id, |info| {
+                    info.name = Some(name)
+                });
             }
             zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                state.update_output_info_wl_output(*data, qhandle, |info| info.loc = Some((x, y)));
+                state.update_output_info_wl_output(out_id, |info| {
+                    info.loc = Some((x, y))
+                });
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
-                state.update_output_info_wl_output(*data, qhandle, |info| {
+                state.update_output_info_wl_output(out_id, |info| {
                     info.logical_size = Some((width, height))
                 });
             }
@@ -724,15 +753,18 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for State {
         event: <ZwlrOutputHeadV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _qhandle: &QueueHandle<Self>,
     ) {
-        let id = proxy.id().protocol_id();
+        let id = TypedObjectId::new(proxy);
         match event {
             zwlr_output_head_v1::Event::Name { name } => {
-                state.update_output_info_zwlr_head(id, qhandle, |data| data.0 = Some(name));
+                state.update_output_info_zwlr_head(id, |data| data.name = Some(name));
             }
             zwlr_output_head_v1::Event::Scale { scale } => {
-                state.update_output_info_zwlr_head(id, qhandle, |data| data.1 = Some(scale));
+                state.update_output_info_zwlr_head(id, |data| data.scale = Some(scale));
+            }
+            zwlr_output_head_v1::Event::Enabled { enabled } => {
+                state.update_output_info_zwlr_head(id, |data| data.enabled = Some(enabled != 0));
             }
             _ => {}
         }
@@ -870,17 +902,17 @@ impl State {
             None // will be filled by the callback
         };
 
-        let mut partial_outputs = BTreeMap::new();
+        let mut partial_outputs = HashMap::new();
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
                 let output: WlOutput =
-                    registry.bind(g.name, WlOutput::interface().version, &eq, g.name);
+                    registry.bind(g.name, WlOutput::interface().version, &eq, ());
 
                 // query so we get the dispatch callbacks
-                let _xdg = xdg_output_man.get_xdg_output(&output, &eq, g.name);
+                let _xdg = xdg_output_man.get_xdg_output(&output, &eq, TypedObjectId::new(&output));
 
                 partial_outputs.insert(
-                    g.name,
+                    TypedObjectId::new(&output),
                     PartialOutputInfo {
                         name: None,
                         loc: None,
@@ -888,6 +920,7 @@ impl State {
                         size_pixels: None,
                         refresh: None,
                         output,
+                        has_recvd_done: false,
                     },
                 );
             }
@@ -904,8 +937,8 @@ impl State {
                 args,
                 wl_output: None,
                 partial_outputs,
-                outputs: BTreeMap::new(),
-                output_fractional_scales: BTreeMap::new(),
+                outputs: HashMap::new(),
+                partial_outputs_wlr: HashMap::new(),
                 quit_flag,
                 sigusr1_flag,
                 dri_device,
@@ -923,75 +956,114 @@ impl State {
 
     fn update_output_info_wl_output(
         &mut self,
-        wl_output_name: u32,
-        qhandle: &QueueHandle<State>,
+        id: &TypedObjectId<WlOutput>,
         f: impl FnOnce(&mut PartialOutputInfo),
     ) {
-        let output = self.partial_outputs.get_mut(&wl_output_name).unwrap();
+        let output = self.partial_outputs.get_mut(id).unwrap();
         f(output);
+    }
+
+    fn done_output_info_wl_output(
+        &mut self,
+        id: TypedObjectId<WlOutput>,
+        qhandle: &QueueHandle<State>,
+    ) {
+        let output = self.partial_outputs.get_mut(&id).unwrap();
+
+        // for each output, we will get 2 done events
+        // * when we create the WlOutput the first time
+        // * then again when we probe the xdg output
+        // we only care about the second one, as we want the xdg output info
+        if !output.has_recvd_done {
+            output.has_recvd_done = true;
+            return;
+        }
+
+        let name = match &output.name {
+            Some(name) => name,
+            None => {
+                eprintln!(
+                    "compositor did not provide name for wl_output {}, strange",
+                    id.0.protocol_id()
+                );
+                "<unknown>"
+            }
+        };
 
         // see if the associated zwlr_head has been probed yet
-        if let Some(name) = &output.name {
-            if let Some((_head_name, (_name, Some(scale)))) = self
-                .output_fractional_scales
-                .iter()
-                .find(|elem| elem.1 .0.as_ref() == Some(name))
-            {
-                if let Some(info) = output.complete(*scale) {
-                    self.outputs.insert(wl_output_name, info);
-                    self.start_if_output_probe_complete(qhandle);
+        if let Some((
+            _head_name,
+            PartialOutputInfoWlr {
+                scale: Some(scale),
+                enabled: Some(enabled),
+                ..
+            },
+        )) = self
+            .partial_outputs_wlr
+            .iter()
+            .find(|elem| elem.1.name.as_deref() == Some(name))
+        {
+            if let Some(info) = output.complete(*scale) {
+                if *enabled {
+                    self.outputs.insert(id, Some(info));
+                } else {
+                    self.outputs.insert(id, None);
                 }
             }
         }
+
+        self.start_if_output_probe_complete(qhandle);
     }
 
     fn update_output_info_zwlr_head(
         &mut self,
-        zwlr_head_name: u32,
-        qhandle: &QueueHandle<State>,
-        f: impl FnOnce(&mut (Option<String>, Option<f64>)),
+        id: TypedObjectId<ZwlrOutputHeadV1>,
+        f: impl FnOnce(&mut PartialOutputInfoWlr),
     ) {
-        let output = self
-            .output_fractional_scales
-            .entry(zwlr_head_name)
-            .or_default();
+        let output = self.partial_outputs_wlr.entry(id).or_default();
         f(output);
-
-        if let (Some(name), Some(fractional_scale)) = output {
-            if let Some((wl_output_name, partial_output)) = self
-                .partial_outputs
-                .iter()
-                .find(|po| po.1.name.as_ref() == Some(name))
-            {
-                if let Some(info) = partial_output.complete(*fractional_scale) {
-                    self.outputs.insert(*wl_output_name, info);
-                    self.start_if_output_probe_complete(qhandle);
-                }
-            }
-        }
     }
 
     fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<State>) {
-        let keys = self
-            .output_fractional_scales
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for k in keys {
-            self.update_output_info_zwlr_head(k, qhandle, |(name, scale)| {
-                if name.is_none() {
-                    eprintln!("compositor did not report output name, strange");
-                    *name = Some("<unknown>".to_owned());
-                }
-                if scale.is_none() {
+        for wlr_info in self.partial_outputs_wlr.values() {
+            let enabled = match wlr_info.enabled {
+                None => {
                     eprintln!(
-                        "compositor did not report scale for output {}, assuming one",
-                        name.as_deref().unwrap()
+                        "compositor did not report if output {} is enabled, strange",
+                        wlr_info.name.as_deref().unwrap_or("<unknown>")
                     );
-                    *scale = Some(1.);
+                    true
                 }
-            });
+                Some(enabled) => enabled,
+            };
+
+            let name = match &wlr_info.name {
+                Some(name) => name,
+                None => {
+                    eprintln!("compositor did not report output name, strange");
+                    "<unknown>"
+                }
+            };
+
+            if let Some((wl_output_name, partial_output)) = self
+                .partial_outputs
+                .iter()
+                .find(|po| po.1.name.as_deref() == Some(name))
+            {
+                if let Some(info) = partial_output.complete(wlr_info.scale.unwrap_or(1.)) {
+                    if enabled {
+                        if wlr_info.scale.is_none() {
+                            eprintln!("compositor did not report fractional scale for enabled output {name}");
+                        }
+                        self.outputs.insert(wl_output_name.clone(), Some(info));
+                    } else {
+                        self.outputs.insert(wl_output_name.clone(), None);
+                    }
+                }
+            }
         }
+
+        self.start_if_output_probe_complete(qhandle);
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
@@ -1002,21 +1074,25 @@ impl State {
             return;
         }
 
+        let enabled_outputs: Vec<_> = self.outputs.iter().flat_map(|(_, o)| o).collect();
+
         let (output, (x, y), (w, h)) = match (self.args.geometry, self.args.output.as_str()) {
             (None, "") => {
                 // default case, capture whole monitor
-                if self.outputs.len() != 1 {
-                    eprintln!("multiple displays and no --geometry or --output supplied, bailing");
+                if enabled_outputs.len() != 1 {
+                    eprintln!(
+                        "multiple enabled displays and no --geometry or --output supplied, bailing"
+                    );
                     self.quit_flag.store(true, Ordering::SeqCst);
                     return;
                 }
 
-                let output = self.outputs.iter().next().unwrap().1;
+                let output = enabled_outputs[0];
                 (output, (0, 0), output.size_pixels)
             }
             (None, disp) => {
                 // --output but no --geometry
-                if let Some((_, output)) = self.outputs.iter().find(|(_, i)| i.name == disp) {
+                if let Some(&output) = enabled_outputs.iter().find(|i| i.name == disp) {
                     (output, (0, 0), output.size_pixels)
                 } else {
                     eprintln!("display {} not found, bailing", disp);
@@ -1028,7 +1104,7 @@ impl State {
                 let w = w as i32;
                 let h = h as i32;
                 // --geometry but no --output
-                if let Some((_, output)) = self.outputs.iter().find(|(_, i)| {
+                if let Some(&output) = enabled_outputs.iter().find(|i| {
                     x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
                         y >= i.loc.1 && y + h <= i.loc.1 + i.logical_size.1 // y within
                 }) {
