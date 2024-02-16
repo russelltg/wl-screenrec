@@ -513,14 +513,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::BufferDone => {}
             zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
                 format,
-                width,
-                height,
+                width: dmabuf_width,
+                height: dmabuf_height,
             } => {
                 match &state.enc {
                     EncConstructionStage::None => unreachable!(
                         "Oops, somehow created a screencopy frame without initial enc state stuff?"
                     ),
                     EncConstructionStage::EverythingButFormat { output, x, y, w, h } => {
+                        eprintln!("dmabuf={dmabuf_width}x{dmabuf_height} outupt={}x{}", output.size_pixels.0, output.size_pixels.1);
                         state.enc = EncConstructionStage::Complete(
                             match EncState::new(
                                 &state.args,
@@ -529,7 +530,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                                         .expect("Unknown fourcc"),
                                 ),
                                 output.refresh,
-                                output.size_pixels,
+                                (dmabuf_width as i32, dmabuf_height as i32),
                                 (*x, *y),
                                 (*w, *h),
                                 Arc::clone(&state.sigusr1_flag),
@@ -571,8 +572,8 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 );
 
                 let buf = dma_params.create_immed(
-                    width as i32,
-                    height as i32,
+                    dmabuf_width as i32,
+                    dmabuf_height as i32,
                     format,
                     zwp_linux_buffer_params_v1::Flags::empty(),
                     qhandle,
