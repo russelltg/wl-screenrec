@@ -708,14 +708,10 @@ impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
     ) {
         match event {
             zxdg_output_v1::Event::Name { name } => {
-                state.update_output_info_wl_output(out_id, |info| {
-                    info.name = Some(name)
-                });
+                state.update_output_info_wl_output(out_id, |info| info.name = Some(name));
             }
             zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                state.update_output_info_wl_output(out_id, |info| {
-                    info.loc = Some((x, y))
-                });
+                state.update_output_info_wl_output(out_id, |info| info.loc = Some((x, y)));
             }
             zxdg_output_v1::Event::LogicalSize { width, height } => {
                 state.update_output_info_wl_output(out_id, |info| {
