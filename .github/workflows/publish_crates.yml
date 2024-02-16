@@ -12,8 +12,12 @@ jobs:
     publish:
         name: Publish wl-screenrec
         runs-on: ubuntu-latest
+        container:
+          image: archlinux:latest
         steps:
           - uses: actions/checkout@v3
+          - name: Install system deps
+            run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf
           - uses: actions-rs/toolchain@v1
             with:
                 toolchain: stable
