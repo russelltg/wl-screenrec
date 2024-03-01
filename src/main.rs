@@ -3,6 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{c_int, CStr},
+    fmt,
     marker::PhantomData,
     mem::swap,
     num::ParseIntError,
@@ -341,7 +342,7 @@ impl PartialOutputInfo {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct OutputInfo {
     name: String,
     loc: (i32, i32),
@@ -371,6 +372,12 @@ struct TypedObjectId<T>(ObjectId, PhantomData<T>);
 impl<T> TypedObjectId<T> {
     fn new(from: &impl Proxy) -> Self {
         TypedObjectId(from.id(), Default::default())
+    }
+}
+
+impl<T> fmt::Debug for TypedObjectId<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -469,6 +476,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
         _conn: &Connection,
         qhandle: &wayland_client::QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("zwlr-screencopy-frame event: {:?} {event:?}", capture.id());
+        }
         match event {
             zwlr_screencopy_frame_v1::Event::Ready {
                 tv_sec_hi,
@@ -662,6 +672,9 @@ impl Dispatch<WlOutput, ()> for State {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("wl-output event: {:?} {event:?}", proxy.id());
+        }
         let id = TypedObjectId::new(proxy);
         match event {
             wl_output::Event::Mode {
@@ -700,12 +713,15 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
 impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
     fn event(
         state: &mut Self,
-        _proxy: &ZxdgOutputV1,
+        proxy: &ZxdgOutputV1,
         event: <ZxdgOutputV1 as Proxy>::Event,
         out_id: &TypedObjectId<WlOutput>,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("zxdg-output event: {:?} {event:?}", proxy.id());
+        }
         match event {
             zxdg_output_v1::Event::Name { name } => {
                 state.update_output_info_wl_output(out_id, |info| info.name = Some(name));
@@ -726,12 +742,15 @@ impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
 impl Dispatch<ZwlrOutputManagerV1, ()> for State {
     fn event(
         state: &mut Self,
-        _proxy: &ZwlrOutputManagerV1,
+        proxy: &ZwlrOutputManagerV1,
         event: <ZwlrOutputManagerV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
+        }
         if let zwlr_output_manager_v1::Event::Done { .. } = event {
             state.zwlr_ouptut_info_done(qhandle);
         }
@@ -751,6 +770,9 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("zwlr-output-head event: {:?} {event:?}", proxy.id());
+        }
         let id = TypedObjectId::new(proxy);
         match event {
             zwlr_output_head_v1::Event::Name { name } => {
@@ -791,12 +813,15 @@ extern "C" {
 impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
     fn event(
         state: &mut Self,
-        _proxy: &WpDrmLeaseDeviceV1,
+        proxy: &WpDrmLeaseDeviceV1,
         event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        if state.args.verbose >= 2 {
+            eprintln!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
+        }
         if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
             unsafe {
                 let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
@@ -1033,6 +1058,9 @@ impl State {
                 .find(|po| po.1.name.as_deref() == Some(name))
             {
                 if let Some(info) = partial_output.complete(wlr_info.scale.unwrap_or(1.)) {
+                    if self.args.verbose >= 1 {
+                        eprintln!("output probe for {name} is complete")
+                    }
                     if enabled {
                         if wlr_info.scale.is_none() {
                             eprintln!("compositor did not report fractional scale for enabled output {name}");
@@ -1041,6 +1069,8 @@ impl State {
                     } else {
                         self.outputs.insert(wl_output_name.clone(), None);
                     }
+                } else if self.args.verbose >= 2 {
+                    println!("output probe still incomplete for {name}: {partial_output:?}");
                 }
             }
         }
@@ -1053,7 +1083,22 @@ impl State {
 
         if self.outputs.len() != self.partial_outputs.len() {
             // probe not complete
+            if self.args.verbose >= 2 {
+                println!(
+                    "output probe not yet complete, still waiting for {}",
+                    self.partial_outputs
+                        .iter()
+                        .filter(|(id, _)| !self.outputs.contains_key(id))
+                        .map(|(id, po)| format!("({id:?}, {:?})", po))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
             return;
+        }
+
+        if self.args.verbose >= 1 {
+            eprintln!("output probe complete: {:?}", self.outputs);
         }
 
         let enabled_outputs: Vec<_> = self.outputs.iter().flat_map(|(_, o)| o).collect();
