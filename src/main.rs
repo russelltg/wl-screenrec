@@ -34,7 +34,9 @@ use ffmpeg::{
     media, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
+use log::{debug, error, info, trace, warn};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+use simplelog::{ColorChoice, CombinedLogger, LevelFilter, TermLogger, TerminalMode};
 use thiserror::Error;
 use wayland_client::{
     backend::ObjectId,
@@ -476,9 +478,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
         _conn: &Connection,
         qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("zwlr-screencopy-frame event: {:?} {event:?}", capture.id());
-        }
+        debug!("zwlr-screencopy-frame event: {:?} {event:?}", capture.id());
         match event {
             zwlr_screencopy_frame_v1::Event::Ready {
                 tv_sec_hi,
@@ -672,9 +672,7 @@ impl Dispatch<WlOutput, ()> for State {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("wl-output event: {:?} {event:?}", proxy.id());
-        }
+        debug!("wl-output event: {:?} {event:?}", proxy.id());
         let id = TypedObjectId::new(proxy);
         match event {
             wl_output::Event::Mode {
@@ -719,9 +717,7 @@ impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("zxdg-output event: {:?} {event:?}", proxy.id());
-        }
+        debug!("zxdg-output event: {:?} {event:?}", proxy.id());
         match event {
             zxdg_output_v1::Event::Name { name } => {
                 state.update_output_info_wl_output(out_id, |info| info.name = Some(name));
@@ -748,9 +744,7 @@ impl Dispatch<ZwlrOutputManagerV1, ()> for State {
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
-        }
+        debug!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
         if let zwlr_output_manager_v1::Event::Done { .. } = event {
             state.zwlr_ouptut_info_done(qhandle);
         }
@@ -770,9 +764,7 @@ impl Dispatch<ZwlrOutputHeadV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("zwlr-output-head event: {:?} {event:?}", proxy.id());
-        }
+        debug!("zwlr-output-head event: {:?} {event:?}", proxy.id());
         let id = TypedObjectId::new(proxy);
         match event {
             zwlr_output_head_v1::Event::Name { name } => {
@@ -819,14 +811,12 @@ impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        if state.args.verbose >= 2 {
-            eprintln!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
-        }
+        debug!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
         if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
             unsafe {
                 let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
                 state.dri_device = Some(if ptr.is_null() {
-                    eprintln!(
+                    warn!(
                         "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
                     );
                     "/dev/dri/renderD128".to_owned()
@@ -900,10 +890,7 @@ impl State {
             )
             .is_err()
         {
-            if args.verbose >= 1 {
-                eprintln!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128. pass --dri-device if this is incorrect or to suppress this warning");
-            }
-
+            warn!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128. pass --dri-device if this is incorrect or to suppress this warning");
             Some("/dev/dri/renderD128".to_owned())
         } else {
             None // will be filled by the callback
@@ -989,7 +976,7 @@ impl State {
         let name = match &output.name {
             Some(name) => name,
             None => {
-                eprintln!(
+                warn!(
                     "compositor did not provide name for wl_output {}, strange",
                     id.0.protocol_id()
                 );
@@ -1035,7 +1022,7 @@ impl State {
         for wlr_info in self.partial_outputs_wlr.values() {
             let enabled = match wlr_info.enabled {
                 None => {
-                    eprintln!(
+                    warn!(
                         "compositor did not report if output {} is enabled, strange",
                         wlr_info.name.as_deref().unwrap_or("<unknown>")
                     );
@@ -1047,7 +1034,7 @@ impl State {
             let name = match &wlr_info.name {
                 Some(name) => name,
                 None => {
-                    eprintln!("compositor did not report output name, strange");
+                    warn!("compositor did not report output name, strange");
                     "<unknown>"
                 }
             };
@@ -1058,19 +1045,17 @@ impl State {
                 .find(|po| po.1.name.as_deref() == Some(name))
             {
                 if let Some(info) = partial_output.complete(wlr_info.scale.unwrap_or(1.)) {
-                    if self.args.verbose >= 1 {
-                        eprintln!("output probe for {name} is complete")
-                    }
+                    info!("output probe for {name} is complete");
                     if enabled {
                         if wlr_info.scale.is_none() {
-                            eprintln!("compositor did not report fractional scale for enabled output {name}");
+                            warn!("compositor did not report fractional scale for enabled output {name}");
                         }
                         self.outputs.insert(wl_output_name.clone(), Some(info));
                     } else {
                         self.outputs.insert(wl_output_name.clone(), None);
                     }
-                } else if self.args.verbose >= 2 {
-                    println!("output probe still incomplete for {name}: {partial_output:?}");
+                } else {
+                    debug!("output probe still incomplete for {name}: {partial_output:?}");
                 }
             }
         }
@@ -1097,9 +1082,7 @@ impl State {
             return;
         }
 
-        if self.args.verbose >= 1 {
-            eprintln!("output probe complete: {:?}", self.outputs);
-        }
+        info!("output probe complete: {:?}", self.outputs);
 
         let enabled_outputs: Vec<_> = self.outputs.iter().flat_map(|(_, o)| o).collect();
 
@@ -1161,7 +1144,7 @@ impl State {
             }
         };
 
-        eprintln!("Using output {}", output.name);
+        info!("Using output {}", output.name);
 
         self.wl_output = Some(output.output.clone());
         self.enc = EncConstructionStage::EverythingButFormat {
@@ -1182,7 +1165,6 @@ struct EncState {
     frames_rgb: AvHwFrameCtx,
     filter_output_timebase: Rational,
     vid_stream_idx: usize,
-    verbose: u8,
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
     audio: Option<AudioHandle>,
@@ -1289,11 +1271,11 @@ impl EncState {
                     if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
                         Some(codec)
                     } else {
-                        eprintln!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
+                        warn!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
                         None
                     }
                 } else {
-                    eprintln!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
+                    warn!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
                     None
                 }
             } else {
@@ -1316,7 +1298,7 @@ impl EncState {
             match args.encode_pixfmt {
                 Some(fmt) => EncodePixelFormat::Sw(fmt),
                 None => {
-                    eprintln!(
+                    warn!(
                         "codec \"{}\" does not advertize supported pixel formats, just using NV12. Pass --encode-pixfmt to suppress this warning",
                         codec.name()
                     );
@@ -1385,9 +1367,7 @@ impl EncState {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {capture_w}x{capture_h}")
             })?;
 
-        if args.verbose >= 1 {
-            eprintln!("{}", video_filter.dump());
-        }
+        info!("{}", video_filter.dump());
 
         let enc = make_video_params(
             args,
@@ -1471,7 +1451,6 @@ impl EncState {
             octx,
             vid_stream_idx,
             frames_rgb,
-            verbose: args.verbose,
             history_state,
             sigusr1_flag,
             audio,
@@ -1500,9 +1479,7 @@ impl EncState {
                 .unwrap_or(0);
 
             eprintln!("SIGUSR1 received, flushing history");
-            if self.verbose >= 1 {
-                eprintln!("pts offset is {:?}ns", pts_offset_ns);
-            }
+            info!("pts offset is {:?}ns", pts_offset_ns);
 
             // grab this before we set history_state
             let mut hist_moved = VecDeque::new();
@@ -1555,18 +1532,16 @@ impl EncState {
                 let pts_offset = *pts_offset * i64::from(tb.1) / i64::from(tb.0) / 1_000_000_000;
 
                 encoded.set_pts(Some(encoded.pts().unwrap() - pts_offset));
-                if self.verbose >= 3 {
-                    eprintln!(
-                        "writing pts={} on {:?} is_key={}",
-                        encoded.pts().unwrap(),
-                        self.octx
-                            .stream(encoded.stream())
-                            .unwrap()
-                            .parameters()
-                            .medium(),
-                        encoded.is_key()
-                    );
-                }
+                trace!(
+                    "writing pts={} on {:?} is_key={}",
+                    encoded.pts().unwrap(),
+                    self.octx
+                        .stream(encoded.stream())
+                        .unwrap()
+                        .parameters()
+                        .medium(),
+                    encoded.is_key()
+                );
                 encoded.set_dts(encoded.dts().map(|dts| dts - pts_offset));
                 encoded.write_interleaved(&mut self.octx).unwrap();
             }
@@ -1616,15 +1591,13 @@ impl EncState {
                                 }
                             }
 
-                            if self.verbose >= 2 {
-                                eprintln!(
-                                        "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
-                                        current_history_size, history_dur,
-                                        removed_bytes,
-                                        removed_packets,
-                                        self.octx.stream(last_in_stream.stream()).unwrap().parameters().medium()
-                                    );
-                            }
+                            debug!(
+                                "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
+                                current_history_size, history_dur,
+                                removed_bytes,
+                                removed_packets,
+                                self.octx.stream(last_in_stream.stream()).unwrap().parameters().medium()
+                            );
                         } else {
                             break; // there is a second keyframe in the stream, but it isn't old enough yet
                         }
@@ -1778,11 +1751,24 @@ fn main() {
 
     let args = Args::parse();
 
+    CombinedLogger::init(vec![TermLogger::new(
+        match args.verbose {
+            0 => LevelFilter::Warn,
+            1 => LevelFilter::Info,
+            2 => LevelFilter::Debug,
+            3.. => LevelFilter::Trace,
+        },
+        simplelog::Config::default(),
+        TerminalMode::Stderr,
+        ColorChoice::Auto,
+    )])
+    .unwrap();
+
     if !args.audio && args.audio_backend != DEFAULT_AUDIO_BACKEND {
-        eprintln!("Warning: --audio-backend passed without --audio, will be ignored");
+        warn!("--audio-backend passed without --audio, will be ignored");
     }
     if !args.audio && args.audio_device != DEFAULT_AUDIO_CAPTURE_DEVICE {
-        eprintln!("Warning: --audio-device passed without --audio, will be ignored");
+        warn!("--audio-device passed without --audio, will be ignored");
     }
 
     ffmpeg_next::init().unwrap();

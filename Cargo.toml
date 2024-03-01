@@ -19,7 +19,8 @@ clap = { version = "4", default-features = false, features = [
     "error-context",
     "suggestions",
 ] }
-wayland-client = "0.31"
+wayland-client = { version = "0.31", features = ["log"] }
+wayland-backend = { version = "0.3.3", features = ["log"] }
 wayland-protocols = { version = "0.31", features = [
     "client",
     "unstable",
@@ -35,10 +36,12 @@ human-size = "0.4.2"
 signal-hook = "0.3.15"
 anyhow = "1.0.71"
 libc = "0.2.147"
+simplelog = "0.12.1"
+log = "0.4.21"
 
 
 [dev-dependencies]
-nix = { version = "0.27.1", default-features = false, features = [
+nix = { version = "0.28.0", default-features = false, features = [
     "signal",
     "process",
 ] }
