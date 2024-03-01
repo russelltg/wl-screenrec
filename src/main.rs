@@ -852,24 +852,23 @@ impl State {
         args: Args,
         quit_flag: Arc<AtomicBool>,
         sigusr1_flag: Arc<AtomicBool>,
-    ) -> (Self, EventQueue<Self>) {
+    ) -> anyhow::Result<(Self, EventQueue<Self>)> {
         let display = conn.display();
 
         let (gm, queue) = registry_queue_init(conn).unwrap();
         let eq: QueueHandle<State> = queue.handle();
 
         let man: ZwlrScreencopyManagerV1 = gm
-            .bind(&eq, 3..=ZwlrScreencopyManagerV1::interface().version, ())
-            .unwrap();
+            .bind(&eq, 3..=ZwlrScreencopyManagerV1::interface().version, ()).context("your compositor does not support zwlr-screencopy-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
         let dma: ZwpLinuxDmabufV1 = gm
             .bind(&eq, 4..=ZwpLinuxDmabufV1::interface().version, ())
-            .unwrap();
+            .context("your compositor does not support zwp-linux-dmabuf and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
         let registry = display.get_registry(&eq, ());
 
         let xdg_output_man: ZxdgOutputManagerV1 = gm
             .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
-            .unwrap();
+            .context("your compositor does not support zxdg-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
         // bind to get events so we can get the fractional scale
         let _wlr_output_man: ZwlrOutputManagerV1 = gm
@@ -878,7 +877,7 @@ impl State {
                 1..=ZwlrOutputManagerV1::interface().version,
                 (),
             )
-            .expect("Your compositor does not seem to support the wlr-output-manager protocol. wl-screenrec requires a wlroots based compositor like sway or Hyprland");
+            .context("your compositor does not support zwlr-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
         let dri_device = if let Some(dev) = &args.dri_device {
             Some(dev.clone())
@@ -920,7 +919,7 @@ impl State {
             }
         }
 
-        (
+        Ok((
             State {
                 surfaces_owned_by_compositor: VecDeque::new(),
                 dma,
@@ -938,7 +937,7 @@ impl State {
                 dri_device,
             },
             queue,
-        )
+        ))
     }
 
     fn queue_copy(&mut self, eq: &QueueHandle<State>) {
@@ -1789,7 +1788,13 @@ fn main() {
         }
     };
 
-    let (mut state, mut queue) = State::new(&conn, args, quit_flag.clone(), sigusr1_flag);
+    let (mut state, mut queue) = match State::new(&conn, args, quit_flag.clone(), sigusr1_flag) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1);
+        }
+    };
 
     while !quit_flag.load(Ordering::SeqCst) {
         queue.blocking_dispatch(&mut state).unwrap();
