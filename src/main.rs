@@ -40,13 +40,14 @@ use log::{debug, error, info, trace, warn};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use simplelog::{ColorChoice, CombinedLogger, LevelFilter, TermLogger, TerminalMode};
 use thiserror::Error;
+use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
     event_created_child,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
-        wl_output::{self, Mode, WlOutput},
+        wl_output::{self, Mode, Transform, WlOutput},
         wl_registry::WlRegistry,
     },
     ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
@@ -84,6 +85,7 @@ use avhw::{AvHwDevCtx, AvHwFrameCtx};
 
 mod audio;
 mod fifo;
+mod transform;
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -352,6 +354,7 @@ struct PartialOutputInfo {
     refresh: Option<Rational>,
     output: WlOutput,
     has_recvd_done: bool,
+    transform: Option<Transform>,
 }
 impl PartialOutputInfo {
     fn complete(&self, fractional_scale: f64) -> Option<OutputInfo> {
@@ -370,6 +373,7 @@ impl PartialOutputInfo {
                 fractional_scale,
                 size_pixels: *size_pixels,
                 output: self.output.clone(),
+                transform: self.transform.unwrap_or(Transform::Normal),
             })
         } else {
             None
@@ -386,11 +390,16 @@ struct OutputInfo {
     refresh: Rational,
     fractional_scale: f64,
     output: WlOutput,
+    transform: Transform,
 }
 
 impl OutputInfo {
     fn logical_to_pixel(&self, logical: i32) -> i32 {
         (f64::from(logical) * self.fractional_scale).round() as i32
+    }
+
+    fn size_screen_space(&self) -> (i32, i32) {
+        transpose_if_transform_transposed(self.size_pixels, self.transform)
     }
 }
 
@@ -441,13 +450,7 @@ struct State {
 
 enum EncConstructionStage {
     None,
-    EverythingButFormat {
-        output: OutputInfo,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-    },
+    EverythingButFormat { output: OutputInfo, roi: Rect },
     Complete(EncState),
 }
 impl EncConstructionStage {
@@ -563,7 +566,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     EncConstructionStage::None => unreachable!(
                         "Oops, somehow created a screencopy frame without initial enc state stuff?"
                     ),
-                    EncConstructionStage::EverythingButFormat { output, x, y, w, h } => {
+                    EncConstructionStage::EverythingButFormat { output, roi } => {
                         state.enc = EncConstructionStage::Complete(
                             match EncState::new(
                                 &state.args,
@@ -572,9 +575,9 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                                         .expect("Unknown fourcc"),
                                 ),
                                 output.refresh,
+                                output.transform,
                                 (dmabuf_width as i32, dmabuf_height as i32),
-                                (*x, *y),
-                                (*w, *h),
+                                *roi,
                                 Arc::clone(&state.sigusr1_flag),
                                 state
                                     .dri_device
@@ -721,6 +724,14 @@ impl Dispatch<WlOutput, ()> for State {
                     });
                 }
             }
+            wl_output::Event::Geometry { transform, .. } => match transform {
+                WEnum::Value(v) => {
+                    state.update_output_info_wl_output(&id, |info| info.transform = Some(v))
+                }
+                WEnum::Unknown(u) => {
+                    eprintln!("Unknown output transform value: {u}")
+                }
+            },
             wl_output::Event::Done => {
                 state.done_output_info_wl_output(id, qhandle);
             }
@@ -947,6 +958,7 @@ impl State {
                         refresh: None,
                         output,
                         has_recvd_done: false,
+                        transform: None,
                     },
                 );
             }
@@ -1118,7 +1130,7 @@ impl State {
 
         let enabled_outputs: Vec<_> = self.outputs.iter().flat_map(|(_, o)| o).collect();
 
-        let (output, (x, y), (w, h)) = match (self.args.geometry, self.args.output.as_str()) {
+        let (output, roi) = match (self.args.geometry, self.args.output.as_str()) {
             (None, "") => {
                 // default case, capture whole monitor
                 if enabled_outputs.len() != 1 {
@@ -1130,12 +1142,12 @@ impl State {
                 }
 
                 let output = enabled_outputs[0];
-                (output, (0, 0), output.size_pixels)
+                (output, Rect::new((0, 0), output.size_screen_space()))
             }
             (None, disp) => {
                 // --output but no --geometry
                 if let Some(&output) = enabled_outputs.iter().find(|i| i.name == disp) {
-                    (output, (0, 0), output.size_pixels)
+                    (output, Rect::new((0, 0), output.size_screen_space()))
                 } else {
                     eprintln!("display {} not found, bailing", disp);
                     self.quit_flag.store(1, Ordering::SeqCst);
@@ -1152,11 +1164,13 @@ impl State {
                 }) {
                     (
                         output,
-                        (
-                            output.logical_to_pixel(x - output.loc.0),
-                            output.logical_to_pixel(y - output.loc.1),
+                        Rect::new(
+                            (
+                                output.logical_to_pixel(x - output.loc.0),
+                                output.logical_to_pixel(y - output.loc.1),
+                            ),
+                            (output.logical_to_pixel(w), output.logical_to_pixel(h)),
                         ),
-                        (output.logical_to_pixel(w), output.logical_to_pixel(h)),
                     )
                 } else {
                     eprintln!(
@@ -1181,10 +1195,7 @@ impl State {
         self.wl_output = Some(output.output.clone());
         self.enc = EncConstructionStage::EverythingButFormat {
             output: output.clone(),
-            x,
-            y,
-            w,
-            h,
+            roi,
         };
         self.queue_copy(qhandle);
     }
@@ -1290,9 +1301,9 @@ impl EncState {
         args: &Args,
         capture_pixfmt: Pixel,
         refresh: Rational,
+        transform: Transform,
         (capture_w, capture_h): (i32, i32), // pixels
-        (roi_x, roi_y): (i32, i32),
-        (roi_w, roi_h): (i32, i32),
+        roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &str,
     ) -> anyhow::Result<Self> {
@@ -1401,18 +1412,18 @@ impl EncState {
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {capture_w}x{capture_h}"))?;
 
-        let (enc_w, enc_h) = match args.encode_resolution {
+        let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
             Some((x, y)) => (x as i32, y as i32),
-            None => (roi_w, roi_h),
+            None => (roi_screen_coord.w, roi_screen_coord.h),
         };
 
         let (video_filter, filter_timebase) = video_filter(
             &mut frames_rgb,
             enc_pixfmt,
             (capture_w, capture_h),
-            (roi_x, roi_y),
-            (roi_w, roi_h),
-            (enc_w, enc_h),
+            roi_screen_coord,
+            (enc_w_screen_coord, enc_h_screen_coord),
+            transform,
         );
 
         let enc_pixfmt_av = match enc_pixfmt {
@@ -1420,7 +1431,7 @@ impl EncState {
             EncodePixelFormat::Sw(fmt) => fmt,
         };
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, enc_w, enc_h)
+            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord)
             .with_context(|| {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {capture_w}x{capture_h}")
             })?;
@@ -1431,7 +1442,7 @@ impl EncState {
             args,
             enc_pixfmt,
             &encoder,
-            (enc_w, enc_h),
+            (enc_w_screen_coord, enc_h_screen_coord),
             refresh,
             global_header,
             &mut hw_device_ctx,
@@ -1460,7 +1471,7 @@ impl EncState {
                             args,
                             enc_pixfmt,
                             &encoder,
-                            (enc_w, enc_h),
+                            (enc_w_screen_coord, enc_h_screen_coord),
                             refresh,
                             global_header,
                             &mut hw_device_ctx,
@@ -1706,9 +1717,9 @@ fn video_filter(
     inctx: &mut AvHwFrameCtx,
     pix_fmt: EncodePixelFormat,
     (capture_width, capture_height): (i32, i32),
-    (roi_x, roi_y): (i32, i32),
-    (roi_w, roi_h): (i32, i32), // size (pixels) of the region to capture
-    (enc_w, enc_h): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled
+    roi_screen_coord: Rect,                               // size (pixels)
+    (enc_w_screen_coord, enc_h_screen_coord): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled.
+    transform: Transform,
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
     g.add(
@@ -1762,6 +1773,34 @@ fn video_filter(
         )
     };
 
+    let transpose_filter = match transform {
+        Transform::_90 => ",transpose_vaapi=dir=clock",
+        Transform::_180 => ",transpose_vaapi=dir=reversal",
+        Transform::_270 => ",transpose_vaapi=dir=cclock",
+        Transform::Flipped => ",transpose_vaapi=dir=hflip",
+        Transform::Flipped90 => ",transpose_vaapi=dir=cclock_flip",
+        Transform::Flipped180 => ",transpose_vaapi=dir=vflip",
+        Transform::Flipped270 => ",transpose_vaapi=dir=clock_flip",
+        Transform::Normal | _ => "",
+    };
+
+    // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
+    // after the format conversion
+    // which means we have to transform the crop to be in the *pre* transpose space
+    let Rect {
+        x: roi_x,
+        y: roi_y,
+        w: roi_w,
+        h: roi_h,
+    } = roi_screen_coord.screen_to_frame(capture_width, capture_height, transform);
+
+    // sanity check
+    assert!(roi_x >= 0, "{roi_x} < 0");
+    assert!(roi_y >= 0, "{roi_y} < 0");
+
+    let (enc_w, enc_h) =
+        transpose_if_transform_transposed((enc_w_screen_coord, enc_h_screen_coord), transform);
+
     // exact=1 should not be necessary, as the input is not chroma-subsampled
     // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
     // it is harmless to add though, so keep it as a workaround
@@ -1770,7 +1809,7 @@ fn video_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{}",
+            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
             if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
