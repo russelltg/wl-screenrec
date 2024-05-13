@@ -29,7 +29,7 @@ wayland-protocols = { version = "0.31", features = [
 wayland-protocols-wlr = { version = "0.2", features = ["client"] }
 
 # ffmpeg-next does not support ffmpeg 6.1 yet, so grab from the 6.1 PR
-ffmpeg-next = "6.1"
+ffmpeg-next = "7.0.1"
 thiserror = "1.0.38"
 drm-fourcc = "2.2.0"
 human-size = "0.4.2"
