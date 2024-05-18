@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::bail;
 use ffmpeg::{
-    codec::Context,
+    codec::{audio, Context, Id},
     decoder, encoder,
     ffi::{av_find_input_format, av_get_default_channel_layout, AVChannelOrder},
     filter,
@@ -168,15 +168,20 @@ impl AudioHandle {
         args: &Args,
         octx: &mut format::context::Output,
     ) -> anyhow::Result<IncompleteAudioState> {
-        let codec = ffmpeg::encoder::find(
-            octx.format()
-                .codec(&args.output, ffmpeg::media::Type::Audio),
-        )
-        .unwrap()
-        .audio()
-        .unwrap();
+        let audio_codec_id = octx
+            .format()
+            .codec(&args.output, ffmpeg::media::Type::Audio);
 
-        let mut ost_audio = octx.add_stream(codec).unwrap();
+        if audio_codec_id == Id::None {
+            bail!("Container format {} does not support audio!", octx.format().name());
+        }
+
+        let audio_codec = ffmpeg::encoder::find(audio_codec_id)
+            .unwrap()
+            .audio()
+            .unwrap();
+
+        let mut ost_audio = octx.add_stream(audio_codec).unwrap();
 
         let input_format = unsafe {
             let audio_backend = CString::new(args.audio_backend.clone()).unwrap();
@@ -206,7 +211,7 @@ impl AudioHandle {
             .audio()
             .unwrap();
 
-        let enc_audio_channel_layout = codec
+        let enc_audio_channel_layout = audio_codec
             .channel_layouts()
             .map(|cls| cls.best(dec_audio.channel_layout().channels()))
             .unwrap_or(ChannelLayout::STEREO);
@@ -221,11 +226,11 @@ impl AudioHandle {
         enc_audio.set_rate(audio_decoder_rate);
         enc_audio.set_channel_layout(enc_audio_channel_layout);
         enc_audio.set_channels(enc_audio_channel_layout.channels());
-        let audio_encode_format = codec.formats().unwrap().next().unwrap();
+        let audio_encode_format = audio_codec.formats().unwrap().next().unwrap();
         enc_audio.set_format(audio_encode_format);
         enc_audio.set_time_base(dec_audio.time_base());
 
-        let enc_audio = enc_audio.open_as(codec).unwrap();
+        let enc_audio = enc_audio.open_as(audio_codec).unwrap();
 
         ost_audio.set_parameters(&enc_audio);
 

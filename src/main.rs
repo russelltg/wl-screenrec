@@ -550,7 +550,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                             ) {
                                 Ok(enc) => enc,
                                 Err(e) => {
-                                    eprintln!("failed to create encoder: {}", e);
+                                    eprintln!("failed to create encoder(s): {}", e);
                                     state.quit_flag.store(true, Ordering::SeqCst);
                                     return;
                                 }
