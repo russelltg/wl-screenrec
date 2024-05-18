@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::bail;
 use ffmpeg::{
-    codec::{audio, Context, Id},
+    codec::{Context, Id},
     decoder, encoder,
     ffi::{av_find_input_format, av_get_default_channel_layout, AVChannelOrder},
     filter,
@@ -173,7 +173,10 @@ impl AudioHandle {
             .codec(&args.output, ffmpeg::media::Type::Audio);
 
         if audio_codec_id == Id::None {
-            bail!("Container format {} does not support audio!", octx.format().name());
+            bail!(
+                "Container format {} does not support audio!",
+                octx.format().name()
+            );
         }
 
         let audio_codec = ffmpeg::encoder::find(audio_codec_id)

@@ -11,7 +11,7 @@ use std::{
     process::exit,
     str::from_utf8_unchecked,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
     thread::{sleep, spawn},
@@ -401,7 +401,7 @@ struct State {
     partial_outputs_wlr: HashMap<TypedObjectId<ZwlrOutputHeadV1>, PartialOutputInfoWlr>,
     partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
-    quit_flag: Arc<AtomicBool>,
+    quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
     dri_device: Option<String>,
 }
@@ -551,7 +551,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                                 Ok(enc) => enc,
                                 Err(e) => {
                                     eprintln!("failed to create encoder(s): {}", e);
-                                    state.quit_flag.store(true, Ordering::SeqCst);
+                                    state.quit_flag.store(1, Ordering::SeqCst);
                                     return;
                                 }
                             },
@@ -608,7 +608,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
                 eprintln!("Failed to screencopy!");
-                state.quit_flag.store(true, Ordering::SeqCst)
+                state.quit_flag.store(1, Ordering::SeqCst)
             }
             _ => {}
         }
@@ -850,7 +850,7 @@ impl State {
     fn new(
         conn: &Connection,
         args: Args,
-        quit_flag: Arc<AtomicBool>,
+        quit_flag: Arc<AtomicUsize>,
         sigusr1_flag: Arc<AtomicBool>,
     ) -> anyhow::Result<(Self, EventQueue<Self>)> {
         let display = conn.display();
@@ -1092,7 +1092,7 @@ impl State {
                     eprintln!(
                         "multiple enabled displays and no --geometry or --output supplied, bailing"
                     );
-                    self.quit_flag.store(true, Ordering::SeqCst);
+                    self.quit_flag.store(1, Ordering::SeqCst);
                     return;
                 }
 
@@ -1105,7 +1105,7 @@ impl State {
                     (output, (0, 0), output.size_pixels)
                 } else {
                     eprintln!("display {} not found, bailing", disp);
-                    self.quit_flag.store(true, Ordering::SeqCst);
+                    self.quit_flag.store(1, Ordering::SeqCst);
                     return;
                 }
             }
@@ -1130,7 +1130,7 @@ impl State {
                         "region {},{} {}x{} is not entirely within one output, bailing",
                         x, y, w, h
                     );
-                    self.quit_flag.store(true, Ordering::SeqCst);
+                    self.quit_flag.store(1, Ordering::SeqCst);
                     return;
                 }
             }
@@ -1138,7 +1138,7 @@ impl State {
                 eprintln!(
                     "both --geometry and --output were passed, which is not allowed, bailing"
                 );
-                self.quit_flag.store(true, Ordering::SeqCst);
+                self.quit_flag.store(1, Ordering::SeqCst);
                 return;
             }
         };
@@ -1740,12 +1740,12 @@ fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
 }
 
 fn main() {
-    let quit_flag = Arc::new(AtomicBool::new(false));
+    let quit_flag = Arc::new(AtomicUsize::new(usize::MAX)); // ::MAX means still running, otherwise it's an exit value
     let sigusr1_flag = Arc::new(AtomicBool::new(false));
 
-    signal_hook::flag::register(SIGINT, Arc::clone(&quit_flag)).unwrap();
-    signal_hook::flag::register(SIGTERM, Arc::clone(&quit_flag)).unwrap();
-    signal_hook::flag::register(SIGHUP, Arc::clone(&quit_flag)).unwrap();
+    signal_hook::flag::register_usize(SIGINT, Arc::clone(&quit_flag), 0).unwrap();
+    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 1).unwrap();
+    signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
     signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
 
     let args = Args::parse();
@@ -1796,11 +1796,13 @@ fn main() {
         }
     };
 
-    while !quit_flag.load(Ordering::SeqCst) {
+    while quit_flag.load(Ordering::SeqCst) == usize::MAX {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
     if let EncConstructionStage::Complete(enc) = &mut state.enc {
         enc.flush();
     }
+
+    exit(quit_flag.load(Ordering::SeqCst) as i32)
 }
