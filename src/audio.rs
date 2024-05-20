@@ -179,7 +179,7 @@ impl AudioHandle {
         } else {
             let audio_codec_id = match args.audio_codec {
                 crate::AudioCodec::Auto => octx
-            .format()
+                    .format()
                     .codec(&args.output, ffmpeg::media::Type::Audio),
                 crate::AudioCodec::Aac => Id::AAC,
                 crate::AudioCodec::Mp3 => Id::MP3,
@@ -187,16 +187,16 @@ impl AudioHandle {
                 crate::AudioCodec::Opus => Id::OPUS,
             };
 
-        if audio_codec_id == Id::None {
-            bail!(
-                "Container format {} does not support audio!",
-                octx.format().name()
-            );
-        }
+            if audio_codec_id == Id::None {
+                bail!(
+                    "Container format {} does not support audio!",
+                    octx.format().name()
+                );
+            }
 
             ffmpeg::encoder::find(audio_codec_id)
-            .unwrap()
-            .audio()
+                .unwrap()
+                .audio()
                 .unwrap()
         };
 
