@@ -130,6 +130,8 @@ wl-screenrec --ffmpeg-muxer v4l2 -f /dev/video6
 
 ```text
 $ wl-screenrec --help
+High performance screen/audio recorder for wlroots
+
 Usage: wl-screenrec [OPTIONS]
 
 Options:
@@ -151,8 +153,14 @@ Options:
           which video codec to use. Ignored if `--ffmpeg-encoder` is supplied [default: auto] [possible values: auto, avc, hevc, vp8, vp9, av1]
       --ffmpeg-muxer <FFMPEG_MUXER>
           Which ffmpeg muxer to use. Guessed from output filename by default
+      --ffmpeg-muxer-options <FFMPEG_MUXER_OPTIONS>
+          Options to pass to the muxer. Format looks like key=val,key2=val2
       --ffmpeg-encoder <FFMPEG_ENCODER>
           Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be
+      --audio-codec <AUDIO_CODEC>
+          Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied [default: auto] [possible values: auto, aac, mp3, flac, opus]
+      --ffmpeg-audio-encoder <FFMPEG_AUDIO_ENCODER>
+          Use this to force a particular audio ffmpeg encoder. By default, this is guessed from the muxer (which is guess by the file extension if --ffmpeg-muxer isn't passed)
       --encode-pixfmt <ENCODE_PIXFMT>
           which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10
       --encode-resolution <ENCODE_RESOLUTION>
