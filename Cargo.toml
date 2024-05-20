@@ -30,6 +30,7 @@ wayland-protocols-wlr = { version = "0.2", features = ["client"] }
 
 # ffmpeg-next does not support ffmpeg 6.1 yet, so grab from the 6.1 PR
 ffmpeg-next = "7.0.1"
+ffmpeg-sys-next = "7.0.0" # need direct dep on -sys to get metadata to consume in build.rs
 thiserror = "1.0.38"
 drm-fourcc = "2.2.0"
 human-size = "0.4.2"

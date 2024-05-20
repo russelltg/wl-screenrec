@@ -1,6 +1,6 @@
 use std::{
     cmp::max,
-    ffi::{c_int, CString},
+    ffi::{CStr, CString},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{channel, Receiver, RecvError, Sender, TryRecvError},
@@ -13,7 +13,7 @@ use anyhow::bail;
 use ffmpeg::{
     codec::{Context, Id},
     decoder, encoder,
-    ffi::{av_find_input_format, av_get_default_channel_layout, AVChannelOrder},
+    ffi::{av_channel_layout_describe, av_find_input_format},
     filter,
     format::{self, context::Input, Sample},
     frame, ChannelLayout, Dictionary, Format, Packet, Rational,
@@ -228,6 +228,7 @@ impl AudioHandle {
         let audio_decoder_rate = dec_audio.rate() as i32;
         enc_audio.set_rate(audio_decoder_rate);
         enc_audio.set_channel_layout(enc_audio_channel_layout);
+        #[cfg(not(feature = "ffmpeg_7_0"))] // in ffmpeg 7, this is handled by set_channel_layout
         enc_audio.set_channels(enc_audio_channel_layout.channels());
         let audio_encode_format = audio_codec.formats().unwrap().next().unwrap();
         enc_audio.set_format(audio_encode_format);
@@ -330,24 +331,34 @@ fn audio_filter(
 ) -> filter::Graph {
     let mut g = ffmpeg::filter::graph::Graph::new();
 
-    // let channel_format_str = avchannelformat_to_string(params.ch_layout);
     let sample_format = input.format();
 
     let ch_layout = unsafe { input.as_ptr().read().ch_layout };
-    let ch_layout_mask = if ch_layout.order == AVChannelOrder::AV_CHANNEL_ORDER_NATIVE {
-        unsafe { ch_layout.u.mask }
-    } else {
-        unsafe { av_get_default_channel_layout(input.channels() as c_int) as u64 }
+
+    let mut channel_layout_buf = [0u8; 128];
+    let channel_layout_specifier = unsafe {
+        let bytes = av_channel_layout_describe(
+            &ch_layout,
+            channel_layout_buf.as_mut_ptr().cast(),
+            channel_layout_buf.len(),
+        );
+        assert!(bytes > 0, "{:?}: {:?}", ch_layout.order, bytes);
+        std::str::from_utf8(
+            CStr::from_bytes_until_nul(&channel_layout_buf[..])
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap()
     };
 
     g.add(
         &filter::find("abuffer").unwrap(),
         "in",
         &format!(
-            "sample_rate={}:sample_fmt={}:channel_layout={:#x}",
+            "sample_rate={}:sample_fmt={}:channel_layout={}",
             input.rate(),
             sample_format.name(),
-            ch_layout_mask
+            channel_layout_specifier
         ),
     )
     .unwrap();
