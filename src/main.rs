@@ -2,13 +2,14 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::{c_int, CStr},
+    ffi::{c_int, CStr, CString},
     fmt,
     marker::PhantomData,
     mem::swap,
     num::ParseIntError,
     os::fd::{AsRawFd, BorrowedFd},
     process::exit,
+    ptr::null_mut,
     str::from_utf8_unchecked,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -22,11 +23,12 @@ use anyhow::{bail, format_err, Context};
 use audio::AudioHandle;
 use clap::{command, ArgAction, Parser};
 use ffmpeg::{
-    codec, dict, encoder,
+    codec, dict, dictionary, encoder,
     ffi::{
-        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
-        av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3, avformat_query_codec,
-        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
+        av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
+        av_dict_parse_string, av_free, av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3,
+        avformat_query_codec, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE,
+        FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
@@ -149,6 +151,12 @@ pub struct Args {
         help = "Which ffmpeg muxer to use. Guessed from output filename by default"
     )]
     ffmpeg_muxer: Option<String>,
+
+    #[clap(
+        long,
+        help = "Options to pass to the muxer. Format looks like key=val,key2=val2"
+    )]
+    ffmpeg_muxer_options: Option<String>,
 
     #[clap(
         long,
@@ -1231,6 +1239,26 @@ fn make_video_params(
     Ok(enc)
 }
 
+fn parse_dict(dict: &str) -> Result<dictionary::Owned, ffmpeg::Error> {
+    let cstr = CString::new(dict).unwrap();
+
+    let mut ptr = null_mut();
+    unsafe {
+        let res = av_dict_parse_string(
+            &mut ptr,
+            cstr.as_ptr(),
+            b"=:\0".as_ptr().cast(),
+            b",\0".as_ptr().cast(),
+            0,
+        );
+        if res != 0 {
+            return Err(ffmpeg::Error::from(res));
+        }
+
+        Ok(dictionary::Owned::own(ptr))
+    }
+}
+
 impl EncState {
     // assumed that capture_{w,h}
     fn new(
@@ -1243,10 +1271,16 @@ impl EncState {
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &str,
     ) -> anyhow::Result<Self> {
-        let mut octx = if let Some(muxer) = &args.ffmpeg_muxer {
-            ffmpeg_next::format::output_as(&args.filename, muxer).unwrap()
+        let muxer_options = if let Some(muxer_options) = &args.ffmpeg_muxer_options {
+            parse_dict(muxer_options).unwrap()
         } else {
-            ffmpeg_next::format::output(&args.filename).unwrap()
+            dict!()
+        };
+
+        let mut octx = if let Some(muxer) = &args.ffmpeg_muxer {
+            ffmpeg_next::format::output_as_with(&args.filename, muxer, muxer_options).unwrap()
+        } else {
+            ffmpeg_next::format::output_with(&args.filename, muxer_options).unwrap()
         };
 
         let codec = if let Some(encoder) = &args.ffmpeg_encoder {
