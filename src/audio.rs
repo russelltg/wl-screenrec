@@ -11,7 +11,7 @@ use std::{
 
 use anyhow::{anyhow, bail};
 use ffmpeg::{
-    codec::{self, Context, Id},
+    codec::{Context, Id},
     decoder,
     encoder::{self},
     ffi::{av_channel_layout_describe, av_find_input_format},
@@ -170,7 +170,7 @@ impl AudioHandle {
         octx: &mut format::context::Output,
     ) -> anyhow::Result<IncompleteAudioState> {
         let audio_codec = if let Some(enc) = &args.ffmpeg_audio_encoder {
-            encoder::find_by_name(&enc)
+            encoder::find_by_name(enc)
                 .ok_or_else(|| {
                     anyhow!("codec {enc} specified by --ffmpeg-audio-encoder does not exist")
                 })?
