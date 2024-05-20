@@ -167,6 +167,21 @@ pub struct Args {
 
     #[clap(
         long,
+        value_enum,
+        default_value_t,
+        help = "Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied"
+    )]
+    audio_codec: AudioCodec,
+
+    #[clap(
+        long,
+        value_enum,
+        help = "Use this to force a particular audio ffmpeg encoder. By default, this is guessed from the muxer (which is guess by the file extension if --ffmpeg-muxer isn't passed)"
+    )]
+    ffmpeg_audio_encoder: Option<String>,
+
+    #[clap(
+        long,
         help = "which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10"
     )]
     encode_pixfmt: Option<Pixel>,
@@ -208,6 +223,16 @@ enum Codec {
     VP8,
     VP9,
     AV1,
+}
+
+#[derive(clap::ValueEnum, Debug, Default, Clone)]
+enum AudioCodec {
+    #[default]
+    Auto,
+    Aac,
+    Mp3,
+    Flac,
+    Opus,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default)]

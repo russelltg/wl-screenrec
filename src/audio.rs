@@ -9,10 +9,11 @@ use std::{
     thread::spawn,
 };
 
-use anyhow::bail;
+use anyhow::{anyhow, bail};
 use ffmpeg::{
-    codec::{Context, Id},
-    decoder, encoder,
+    codec::{self, Context, Id},
+    decoder,
+    encoder::{self},
     ffi::{av_channel_layout_describe, av_find_input_format},
     filter,
     format::{self, context::Input, Sample},
@@ -168,9 +169,23 @@ impl AudioHandle {
         args: &Args,
         octx: &mut format::context::Output,
     ) -> anyhow::Result<IncompleteAudioState> {
-        let audio_codec_id = octx
+        let audio_codec = if let Some(enc) = &args.ffmpeg_audio_encoder {
+            encoder::find_by_name(&enc)
+                .ok_or_else(|| {
+                    anyhow!("codec {enc} specified by --ffmpeg-audio-encoder does not exist")
+                })?
+                .audio()
+                .unwrap()
+        } else {
+            let audio_codec_id = match args.audio_codec {
+                crate::AudioCodec::Auto => octx
             .format()
-            .codec(&args.output, ffmpeg::media::Type::Audio);
+                    .codec(&args.output, ffmpeg::media::Type::Audio),
+                crate::AudioCodec::Aac => Id::AAC,
+                crate::AudioCodec::Mp3 => Id::MP3,
+                crate::AudioCodec::Flac => Id::FLAC,
+                crate::AudioCodec::Opus => Id::OPUS,
+            };
 
         if audio_codec_id == Id::None {
             bail!(
@@ -179,10 +194,11 @@ impl AudioHandle {
             );
         }
 
-        let audio_codec = ffmpeg::encoder::find(audio_codec_id)
+            ffmpeg::encoder::find(audio_codec_id)
             .unwrap()
             .audio()
-            .unwrap();
+                .unwrap()
+        };
 
         let mut ost_audio = octx.add_stream(audio_codec).unwrap();
 
