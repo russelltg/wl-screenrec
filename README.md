@@ -142,7 +142,7 @@ Options:
   -g, --geometry <GEOMETRY>
           geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output
   -o, --output <OUTPUT>
-          Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
+          Which output (display) to record. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
   -v, --verbose...
           add very loud logging. can be specified multiple times
       --dri-device <DRI_DEVICE>

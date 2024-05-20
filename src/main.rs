@@ -121,7 +121,7 @@ pub struct Args {
     #[clap(
         long,
         short,
-        help = "Which output to record to. Mutually exclusive with --geometry. Defaults to your only display if you only have one",
+        help = "Which output (display) to record. Mutually exclusive with --geometry. Defaults to your only display if you only have one",
         default_value = ""
     )]
     output: String,
@@ -214,7 +214,7 @@ pub struct Args {
     gop_size: Option<u32>,
 }
 
-#[derive(clap::ValueEnum, Debug, Clone, Default)]
+#[derive(clap::ValueEnum, Debug, Clone, Default, PartialEq, Eq)]
 enum Codec {
     #[default]
     Auto,
@@ -225,7 +225,7 @@ enum Codec {
     AV1,
 }
 
-#[derive(clap::ValueEnum, Debug, Default, Clone)]
+#[derive(clap::ValueEnum, Debug, Default, Clone, PartialEq, Eq)]
 enum AudioCodec {
     #[default]
     Auto,
@@ -1827,6 +1827,18 @@ fn main() {
     }
     if !args.audio && args.audio_device != DEFAULT_AUDIO_CAPTURE_DEVICE {
         warn!("--audio-device passed without --audio, will be ignored");
+    }
+    if !args.audio && args.audio_codec != AudioCodec::Auto {
+        warn!("--audio-codec passed without --audio, will be ignored");
+    }
+    if !args.audio && args.ffmpeg_audio_encoder.is_some() {
+        warn!("--ffmpeg-audio-encoder without --audio, will be ignored");
+    }
+    if args.ffmpeg_audio_encoder.is_some() && args.audio_codec != AudioCodec::Auto {
+        warn!("--ffmpeg-audio-encoder passed with --audio-codec, --audio-codec will be ignored");
+    }
+    if args.ffmpeg_encoder.is_some() && args.codec != Codec::Auto {
+        warn!("--ffmpeg-encoder passed with --codec, --codec will be ignored");
     }
 
     ffmpeg_next::init().unwrap();
