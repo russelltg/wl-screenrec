@@ -1781,7 +1781,7 @@ fn video_filter(
         Transform::Flipped90 => ",transpose_vaapi=dir=cclock_flip",
         Transform::Flipped180 => ",transpose_vaapi=dir=vflip",
         Transform::Flipped270 => ",transpose_vaapi=dir=clock_flip",
-        Transform::Normal | _ => "",
+        _ => "",
     };
 
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose

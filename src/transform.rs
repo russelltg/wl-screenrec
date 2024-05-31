@@ -31,7 +31,8 @@ fn screen_point_to_frame(
         Transform::Flipped180 | Transform::_90 => (0, capture_h),
         Transform::Flipped270 | Transform::_180 => (capture_w, capture_h),
         Transform::Flipped | Transform::_270 => (capture_w, 0),
-        Transform::Flipped90 | Transform::Normal | _ => (0, 0),
+        Transform::Flipped90 | Transform::Normal => (0, 0),
+        _ => (0, 0),
     };
 
     let screen_basis_frame_coord = transform_basis(transform);
@@ -56,7 +57,7 @@ fn transform_basis(transform: Transform) -> ([i32; 2], [i32; 2]) {
         Transform::Flipped90 => ([0, 1], [1, 0]),
         Transform::Flipped180 => ([1, 0], [0, -1]),
         Transform::Flipped270 => ([0, -1], [-1, 0]),
-        Transform::Normal | _ => ([1, 0], [0, 1]),
+        _ => ([1, 0], [0, 1]),
     }
 }
 
