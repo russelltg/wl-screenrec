@@ -162,7 +162,7 @@ Options:
       --ffmpeg-audio-encoder <FFMPEG_AUDIO_ENCODER>
           Use this to force a particular audio ffmpeg encoder. By default, this is guessed from the muxer (which is guess by the file extension if --ffmpeg-muxer isn't passed)
       --encode-pixfmt <ENCODE_PIXFMT>
-          which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10
+          which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10. If the encoder supports vaapi memory, it will use this pixel format type but in vaapi memory
       --encode-resolution <ENCODE_RESOLUTION>
           what resolution to encode at. example: 1920x1080. Default is the resolution of the captured region. If your goal is reducing filesize, it's suggested to try --bitrate/-b first
   -b, --bitrate <BITRATE>

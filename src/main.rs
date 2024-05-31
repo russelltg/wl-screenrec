@@ -182,7 +182,7 @@ pub struct Args {
 
     #[clap(
         long,
-        help = "which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10"
+        help = "which pixel format to encode with. not all codecs will support all pixel formats. This should be a ffmpeg pixel format string, like nv12 or x2rgb10. If the encoder supports vaapi memory, it will use this pixel format type but in vaapi memory"
     )]
     encode_pixfmt: Option<Pixel>,
 
@@ -1308,10 +1308,10 @@ impl EncState {
             ffmpeg_next::format::output_with(&args.filename, muxer_options).unwrap()
         };
 
-        let codec = if let Some(encoder) = &args.ffmpeg_encoder {
-            ffmpeg_next::encoder::find_by_name(encoder).ok_or_else(|| {
+        let encoder = if let Some(encoder_name) = &args.ffmpeg_encoder {
+            ffmpeg_next::encoder::find_by_name(encoder_name).ok_or_else(|| {
                 format_err!(
-                    "Encoder {encoder} specified with --ffmpeg-encoder could not be instntiated"
+                    "Encoder {encoder_name} specified with --ffmpeg-encoder could not be instntiated"
                 )
             })?
         } else {
@@ -1351,14 +1351,14 @@ impl EncState {
             }
         };
 
-        let supported_formats = supported_formats(&codec);
+        let supported_formats = supported_formats(&encoder);
         let enc_pixfmt = if supported_formats.is_empty() {
             match args.encode_pixfmt {
                 Some(fmt) => EncodePixelFormat::Sw(fmt),
                 None => {
                     warn!(
                         "codec \"{}\" does not advertize supported pixel formats, just using NV12. Pass --encode-pixfmt to suppress this warning",
-                        codec.name()
+                        encoder.name()
                     );
                     EncodePixelFormat::Sw(Pixel::NV12)
                 }
@@ -1373,7 +1373,7 @@ impl EncState {
             }
         };
 
-        let codec_id = codec.id();
+        let codec_id = encoder.id();
         if unsafe {
             avformat_query_codec(
                 octx.format().as_ptr(),
@@ -1430,7 +1430,7 @@ impl EncState {
         let enc = make_video_params(
             args,
             enc_pixfmt,
-            &codec,
+            &encoder,
             (enc_w, enc_h),
             refresh,
             global_header,
@@ -1459,7 +1459,7 @@ impl EncState {
                         make_video_params(
                             args,
                             enc_pixfmt,
-                            &codec,
+                            &encoder,
                             (enc_w, enc_h),
                             refresh,
                             global_header,
@@ -1479,7 +1479,7 @@ impl EncState {
             .unwrap()
         };
 
-        let mut ost_video = octx.add_stream(codec).unwrap();
+        let mut ost_video = octx.add_stream(encoder).unwrap();
 
         let vid_stream_idx = ost_video.index();
         ost_video.set_parameters(&enc_video);
@@ -1839,6 +1839,10 @@ fn main() {
     }
     if args.ffmpeg_encoder.is_some() && args.codec != Codec::Auto {
         warn!("--ffmpeg-encoder passed with --codec, --codec will be ignored");
+    }
+    if args.encode_pixfmt == Some(Pixel::VAAPI) {
+        error!("`--encode-pixfmt vaapi` passed, this is nonsense. It will automatically be transformed into a vaapi pixel format if the selected encoder supports vaapi memory input");
+        exit(1);
     }
 
     ffmpeg_next::init().unwrap();
