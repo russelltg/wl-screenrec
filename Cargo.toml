@@ -21,14 +21,12 @@ clap = { version = "4", default-features = false, features = [
 ] }
 wayland-client = { version = "0.31", features = ["log"] }
 wayland-backend = { version = "0.3.3", features = ["log"] }
-wayland-protocols = { version = "0.31", features = [
+wayland-protocols = { version = "0.32", features = [
     "client",
     "unstable",
     "staging",
 ] }
-wayland-protocols-wlr = { version = "0.2", features = ["client"] }
-
-# ffmpeg-next does not support ffmpeg 6.1 yet, so grab from the 6.1 PR
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 ffmpeg-next = "7.0.1"
 ffmpeg-sys-next = "7.0.0" # need direct dep on -sys to get metadata to consume in build.rs
 thiserror = "1.0.38"
