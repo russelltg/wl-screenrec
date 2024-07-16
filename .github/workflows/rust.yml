@@ -20,7 +20,7 @@ jobs:
       run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf
     - name: Install rust
       run: rustup install stable
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose
     - name: Format

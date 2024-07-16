@@ -15,13 +15,11 @@ jobs:
         container:
           image: archlinux:latest
         steps:
-          - uses: actions/checkout@v3
+          - uses: actions/checkout@v4
           - name: Install system deps
             run: pacman  --noconfirm -Syu ffmpeg rustup gcc clang pkgconf
-          - uses: actions-rs/toolchain@v1
-            with:
-                toolchain: stable
-                override: true
+          - name: Install rust
+            run: rustup install stable
           - name: Publish wl-screenrec to crates.io
             run: cargo publish --manifest-path ./Cargo.toml --token ${CRATES_TOKEN}
             env:
