@@ -3,7 +3,7 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{c_int, CStr, CString},
-    fmt,
+    fmt, io,
     marker::PhantomData,
     mem::swap,
     num::ParseIntError,
@@ -21,7 +21,7 @@ use std::{
 
 use anyhow::{bail, format_err, Context};
 use audio::AudioHandle;
-use clap::{command, ArgAction, Parser};
+use clap::{command, ArgAction, CommandFactory, Parser};
 use ffmpeg::{
     codec, dict, dictionary, encoder,
     ffi::{
@@ -214,6 +214,9 @@ pub struct Args {
 
     #[clap(long = "gop-size", help = "GOP (group of pictures) size")]
     gop_size: Option<u32>,
+
+    #[clap(long = "generate-completions", help = "print completions for the specified shell to stdout")]
+    completions_generator: Option<clap_complete::Shell>,
 }
 
 #[derive(clap::ValueEnum, Debug, Clone, Default, PartialEq, Eq)]
@@ -1838,6 +1841,14 @@ fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
 }
 
 fn main() {
+    let args = Args::parse();
+    if let Some(generator) = args.completions_generator {
+        let mut command = Args::command();
+        let bin_name = command.get_name().to_string();
+        clap_complete::generate(generator, &mut command, bin_name, &mut io::stdout());
+        return;
+    }
+
     let quit_flag = Arc::new(AtomicUsize::new(usize::MAX)); // ::MAX means still running, otherwise it's an exit value
     let sigusr1_flag = Arc::new(AtomicBool::new(false));
 
@@ -1845,8 +1856,6 @@ fn main() {
     signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 1).unwrap();
     signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
     signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
-
-    let args = Args::parse();
 
     CombinedLogger::init(vec![TermLogger::new(
         match args.verbose {
