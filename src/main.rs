@@ -215,7 +215,10 @@ pub struct Args {
     #[clap(long = "gop-size", help = "GOP (group of pictures) size")]
     gop_size: Option<u32>,
 
-    #[clap(long = "generate-completions", help = "print completions for the specified shell to stdout")]
+    #[clap(
+        long = "generate-completions",
+        help = "print completions for the specified shell to stdout"
+    )]
     completions_generator: Option<clap_complete::Shell>,
 }
 
