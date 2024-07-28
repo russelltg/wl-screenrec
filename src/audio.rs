@@ -244,7 +244,7 @@ impl AudioHandle {
         let audio_decoder_rate = dec_audio.rate() as i32;
         enc_audio.set_rate(audio_decoder_rate);
         enc_audio.set_channel_layout(enc_audio_channel_layout);
-        #[cfg(not(feature = "ffmpeg_7_0"))] // in ffmpeg 7, this is handled by set_channel_layout
+        #[cfg(not(ffmpeg_7_0))] // in ffmpeg 7, this is handled by set_channel_layout
         enc_audio.set_channels(enc_audio_channel_layout.channels());
         let audio_encode_format = audio_codec.formats().unwrap().next().unwrap();
         enc_audio.set_format(audio_encode_format);
