@@ -83,7 +83,7 @@ Capture entire output:
 
 ```bash
 wl-screenrec         # valid when you only have one output
-wl-screenrec -o DP-1 # specify outuput
+wl-screenrec -o DP-1 # specify output
 ```
 
 Capture region:
