@@ -3,7 +3,9 @@ extern crate ffmpeg_next as ffmpeg;
 use std::{
     collections::{HashMap, VecDeque},
     ffi::{c_int, CStr, CString},
-    fmt, io,
+    fmt,
+    hash::Hash,
+    io,
     marker::PhantomData,
     mem::swap,
     num::ParseIntError,
@@ -453,16 +455,19 @@ struct State {
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
-    partial_outputs_wlr: HashMap<TypedObjectId<ZwlrOutputHeadV1>, PartialOutputInfoWlr>,
-    partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
-    outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
     quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
     dri_device: Option<String>,
 }
 
+struct OutputProbeState {
+    partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
+    partial_outputs_wlr: HashMap<TypedObjectId<ZwlrOutputHeadV1>, PartialOutputInfoWlr>,
+    outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>, // none for disabled
+}
+
 enum EncConstructionStage {
-    None,
+    ProbingOutputs(OutputProbeState),
     EverythingButFormat { output: OutputInfo, roi: Rect },
     Complete(EncState),
 }
@@ -474,10 +479,6 @@ impl EncConstructionStage {
         } else {
             panic!("unwrap on non-complete EncConstructionStage")
         }
-    }
-
-    fn is_complete(&self) -> bool {
-        matches!(self, EncConstructionStage::Complete(_))
     }
 }
 
@@ -576,7 +577,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                 height: dmabuf_height,
             } => {
                 match &state.enc {
-                    EncConstructionStage::None => unreachable!(
+                    EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                         "Oops, somehow created a screencopy frame without initial enc state stuff?"
                     ),
                     EncConstructionStage::EverythingButFormat { output, roi } => {
@@ -982,14 +983,15 @@ impl State {
                 surfaces_owned_by_compositor: VecDeque::new(),
                 dma,
                 screencopy_manager: man,
-                enc: EncConstructionStage::None,
+                enc: EncConstructionStage::ProbingOutputs(OutputProbeState {
+                    partial_outputs,
+                    partial_outputs_wlr: HashMap::new(),
+                    outputs: HashMap::new(),
+                }),
                 starting_timestamp: None,
                 fps_counter: FpsCounter::new(),
                 args,
                 wl_output: None,
-                partial_outputs,
-                outputs: HashMap::new(),
-                partial_outputs_wlr: HashMap::new(),
                 quit_flag,
                 sigusr1_flag,
                 dri_device,
@@ -1010,8 +1012,11 @@ impl State {
         id: &TypedObjectId<WlOutput>,
         f: impl FnOnce(&mut PartialOutputInfo),
     ) {
-        let output = self.partial_outputs.get_mut(id).unwrap();
-        f(output);
+        if let EncConstructionStage::ProbingOutputs (p) = &mut self.enc
+        {
+            let output = p.partial_outputs.get_mut(id).unwrap();
+            f(output);
+        }
     }
 
     fn done_output_info_wl_output(
@@ -1019,7 +1024,14 @@ impl State {
         id: TypedObjectId<WlOutput>,
         qhandle: &QueueHandle<State>,
     ) {
-        let output = self.partial_outputs.get_mut(&id).unwrap();
+        let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
+            p
+        } else {
+            // got this event because of some dispaly changes, ignore...
+            return;
+        };
+
+        let output = p.partial_outputs.get_mut(&id).unwrap();
 
         // for each output, we will get 2 done events
         // * when we create the WlOutput the first time
@@ -1049,16 +1061,16 @@ impl State {
                 enabled: Some(enabled),
                 ..
             },
-        )) = self
+        )) = p
             .partial_outputs_wlr
             .iter()
             .find(|elem| elem.1.name.as_deref() == Some(name))
         {
             if let Some(info) = output.complete(*scale) {
                 if *enabled {
-                    self.outputs.insert(id, Some(info));
+                    p.outputs.insert(id, Some(info));
                 } else {
-                    self.outputs.insert(id, None);
+                    p.outputs.insert(id, None);
                 }
             }
         }
@@ -1071,12 +1083,20 @@ impl State {
         id: TypedObjectId<ZwlrOutputHeadV1>,
         f: impl FnOnce(&mut PartialOutputInfoWlr),
     ) {
-        let output = self.partial_outputs_wlr.entry(id).or_default();
-        f(output);
+        if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
+            let output = p.partial_outputs_wlr.entry(id).or_default();
+            f(output);
+        }
     }
 
     fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<State>) {
-        for wlr_info in self.partial_outputs_wlr.values() {
+        let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
+            p
+        } else {
+            return;
+        };
+
+        for wlr_info in p.partial_outputs_wlr.values() {
             let enabled = match wlr_info.enabled {
                 None => {
                     warn!(
@@ -1096,7 +1116,7 @@ impl State {
                 }
             };
 
-            if let Some((wl_output_name, partial_output)) = self
+            if let Some((wl_output_name, partial_output)) = p
                 .partial_outputs
                 .iter()
                 .find(|po| po.1.name.as_deref() == Some(name))
@@ -1107,9 +1127,9 @@ impl State {
                         if wlr_info.scale.is_none() {
                             warn!("compositor did not report fractional scale for enabled output {name}");
                         }
-                        self.outputs.insert(wl_output_name.clone(), Some(info));
+                        p.outputs.insert(wl_output_name.clone(), Some(info));
                     } else {
-                        self.outputs.insert(wl_output_name.clone(), None);
+                        p.outputs.insert(wl_output_name.clone(), None);
                     }
                 } else {
                     debug!("output probe still incomplete for {name}: {partial_output:?}");
@@ -1121,16 +1141,20 @@ impl State {
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
-        assert!(!self.enc.is_complete());
+        let p = if let EncConstructionStage::ProbingOutputs(p) = &self.enc {
+            p
+        } else {
+            panic!("bad precondition: is still constructing");
+        };
 
-        if self.outputs.len() != self.partial_outputs.len() {
+        if p.outputs.len() != p.partial_outputs.len() {
             // probe not complete
             if self.args.verbose >= 2 {
                 println!(
                     "output probe not yet complete, still waiting for {}",
-                    self.partial_outputs
+                    p.partial_outputs
                         .iter()
-                        .filter(|(id, _)| !self.outputs.contains_key(id))
+                        .filter(|(id, _)| !p.outputs.contains_key(id))
                         .map(|(id, po)| format!("({id:?}, {:?})", po))
                         .collect::<Vec<_>>()
                         .join(", ")
@@ -1139,9 +1163,9 @@ impl State {
             return;
         }
 
-        info!("output probe complete: {:?}", self.outputs);
+        info!("output probe complete: {:?}", p.outputs);
 
-        let enabled_outputs: Vec<_> = self.outputs.iter().flat_map(|(_, o)| o).collect();
+        let enabled_outputs: Vec<_> = p.outputs.iter().flat_map(|(_, o)| o).collect();
 
         let (output, roi) = match (self.args.geometry, self.args.output.as_str()) {
             (None, "") => {
