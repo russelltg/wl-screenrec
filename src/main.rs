@@ -1012,8 +1012,7 @@ impl State {
         id: &TypedObjectId<WlOutput>,
         f: impl FnOnce(&mut PartialOutputInfo),
     ) {
-        if let EncConstructionStage::ProbingOutputs (p) = &mut self.enc
-        {
+        if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
             let output = p.partial_outputs.get_mut(id).unwrap();
             f(output);
         }
