@@ -157,6 +157,8 @@ Options:
           Options to pass to the muxer. Format looks like key=val,key2=val2
       --ffmpeg-encoder <FFMPEG_ENCODER>
           Use this to force a particular ffmpeg encoder. Generally, this is not necessary and the combo of --codec and --hw can get you to where you need to be
+      --ffmpeg-encoder-options <FFMPEG_ENCODER_OPTIONS>
+          Options to pass to the encoder. Format looks like key=val,key2=val2
       --audio-codec <AUDIO_CODEC>
           Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied [default: auto] [possible values: auto, aac, mp3, flac, opus]
       --ffmpeg-audio-encoder <FFMPEG_AUDIO_ENCODER>
@@ -179,6 +181,8 @@ Options:
           copy every frame, not just unique frames. This can be helpful to get a non-variable framerate video, but is generally discouraged as it uses much more resources. Useful for testing
       --gop-size <GOP_SIZE>
           GOP (group of pictures) size
+      --generate-completions <COMPLETIONS_GENERATOR>
+          print completions for the specified shell to stdout [possible values: bash, elvish, fish, powershell, zsh]
   -h, --help
           Print help
   -V, --version

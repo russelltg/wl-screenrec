@@ -170,6 +170,13 @@ pub struct Args {
     #[clap(
         long,
         value_enum,
+        help = "Options to pass to the encoder. Format looks like key=val,key2=val2"
+    )]
+    ffmpeg_encoder_options: Option<String>,
+
+    #[clap(
+        long,
+        value_enum,
         default_value_t,
         help = "Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied"
     )]
@@ -1219,7 +1226,7 @@ struct EncState {
     audio: Option<AudioHandle>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 enum EncodePixelFormat {
     Vaapi(Pixel),
     Sw(Pixel),
@@ -1389,6 +1396,7 @@ impl EncState {
                 Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
             }
         };
+        info!("encode pixel format is {enc_pixfmt:?}");
 
         let codec_id = encoder.id();
         if unsafe {
@@ -1455,17 +1463,24 @@ impl EncState {
             &mut frames_yuv,
         )?;
 
+        let passed_enc_options = match &args.ffmpeg_encoder_options {
+            Some(enc_options) => parse_dict(enc_options).unwrap(),
+            None => dict!(),
+        };
+
         let enc_video = if args.hw {
-            let low_power_opts = dict! {
-                "low_power" => "1"
+            let low_power_opts = {
+                let mut d = passed_enc_options.clone();
+                d.set("low_power", "1");
+                d
             };
 
             let regular_opts = if codec_id == codec::Id::H264 {
-                dict! {
-                    "level" => "30"
-                }
+                let mut d = passed_enc_options.clone();
+                d.set("level", "30");
+                d
             } else {
-                dict! {}
+                passed_enc_options.clone()
             };
 
             match args.low_power {
@@ -1490,10 +1505,11 @@ impl EncState {
                 LowPowerMode::Off => enc.open_with(regular_opts)?,
             }
         } else {
-            enc.open_with(dict! {
-                "preset" => "ultrafast"
-            })
-            .unwrap()
+            let mut enc_options = passed_enc_options.clone();
+            if enc_options.get("preset").is_none() {
+                enc_options.set("preset", "ultrafast");
+            }
+            enc.open_with(enc_options).unwrap()
         };
 
         let mut ost_video = octx.add_stream(encoder).unwrap();
