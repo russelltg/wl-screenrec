@@ -7,22 +7,26 @@ use std::{
     hash::Hash,
     io,
     marker::PhantomData,
-    mem::swap,
+    mem::{self, swap},
     num::ParseIntError,
     os::fd::{AsRawFd, BorrowedFd},
     process::exit,
     ptr::null_mut,
     str::from_utf8_unchecked,
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{
+            AtomicBool, AtomicU64, AtomicUsize,
+            Ordering::{self, SeqCst},
+        },
         Arc,
     },
-    thread::{sleep, spawn},
+    thread::{self, sleep},
     time::Duration,
 };
 
 use anyhow::{bail, format_err, Context};
 use audio::AudioHandle;
+use cap_wlr_screencopy::CapWlrScreencopy;
 use clap::{command, ArgAction, CommandFactory, Parser};
 use ffmpeg::{
     codec, dict, dictionary, encoder,
@@ -46,7 +50,7 @@ use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
     event_created_child,
-    globals::{registry_queue_init, GlobalListContents},
+    globals::{registry_queue_init, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::{self, Mode, Transform, WlOutput},
@@ -70,22 +74,12 @@ use wayland_protocols::{
         zxdg_output_v1::{self, ZxdgOutputV1},
     },
 };
-use wayland_protocols_wlr::{
-    output_management::v1::client::{
-        zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
-        zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
-        zwlr_output_mode_v1::ZwlrOutputModeV1,
-    },
-    screencopy::v1::client::{
-        zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
-        zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
-    },
-};
 
 mod avhw;
 use avhw::{AvHwDevCtx, AvHwFrameCtx};
 
 mod audio;
+mod cap_wlr_screencopy;
 mod fifo;
 mod transform;
 
@@ -104,6 +98,11 @@ mod platform {
     pub const DEFAULT_AUDIO_BACKEND: &str = "oss";
 }
 use platform::*;
+use wayland_protocols_wlr::output_management::v1::client::{
+    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
+    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
+    zwlr_output_mode_v1::ZwlrOutputModeV1,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -231,6 +230,19 @@ pub struct Args {
     completions_generator: Option<clap_complete::Shell>,
 }
 
+trait CaptureSource: Sized {
+    type Frame: Clone;
+
+    fn new(
+        gm: &GlobalList,
+        eq: &QueueHandle<State<Self>>,
+        output: WlOutput,
+    ) -> anyhow::Result<Self>;
+    fn queue_capture_frame(&self, eq: &QueueHandle<State<Self>>);
+    fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
+    fn on_done_with_frame(&self, f: Self::Frame);
+}
+
 #[derive(clap::ValueEnum, Debug, Clone, Default, PartialEq, Eq)]
 enum Codec {
     #[default]
@@ -319,20 +331,23 @@ impl FpsCounter {
         let ct = Arc::new(AtomicU64::new(0));
         let ct_weak = Arc::<AtomicU64>::downgrade(&ct);
 
-        spawn(move || {
-            let mut last_ct = 0;
-            loop {
-                sleep(Duration::from_millis(1000));
+        thread::Builder::new()
+            .name("FpsCounter".to_owned())
+            .spawn(move || {
+                let mut last_ct = 0;
+                loop {
+                    sleep(Duration::from_millis(1000));
 
-                if let Some(ct_ptr) = ct_weak.upgrade() {
-                    let ct = ct_ptr.load(Ordering::SeqCst);
-                    println!("{} fps", ct - last_ct);
-                    last_ct = ct;
-                } else {
-                    return;
+                    if let Some(ct_ptr) = ct_weak.upgrade() {
+                        let ct = ct_ptr.load(Ordering::SeqCst);
+                        println!("{} fps", ct - last_ct);
+                        last_ct = ct;
+                    } else {
+                        return;
+                    }
                 }
-            }
-        });
+            })
+            .unwrap();
 
         Self { ct }
     }
@@ -440,24 +455,76 @@ impl<T> fmt::Debug for TypedObjectId<T> {
     }
 }
 
-struct State {
-    surfaces_owned_by_compositor: VecDeque<(
+#[link(name = "drm")]
+extern "C" {
+    pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
+}
+
+impl<S> Dispatch<WpDrmLeaseDeviceV1, ()> for State<S>
+where
+    S: CaptureSource + 'static,
+{
+    fn event(
+        state: &mut Self,
+        proxy: &WpDrmLeaseDeviceV1,
+        event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        debug!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
+        if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
+            unsafe {
+                let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
+                state.dri_device = Some(if ptr.is_null() {
+                    warn!(
+                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
+                    );
+                    "/dev/dri/renderD128".to_owned()
+                } else {
+                    let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
+                    libc::free(ptr as *mut _);
+                    ret
+                });
+            };
+        }
+    }
+
+    event_created_child!(State<S>, WpDrmLeaseDeviceV1, [
+        wp_drm_lease_device_v1::EVT_CONNECTOR_OPCODE => (WpDrmLeaseConnectorV1, ()),
+    ]);
+}
+
+impl<S: CaptureSource> Dispatch<WpDrmLeaseConnectorV1, ()> for State<S> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpDrmLeaseConnectorV1,
+        _event: <WpDrmLeaseConnectorV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+struct State<S: CaptureSource> {
+    pub(crate) surfaces_owned_by_compositor: VecDeque<(
         frame::Video,
         video::Video,
         ZwpLinuxBufferParamsV1,
-        ZwlrScreencopyFrameV1,
+        S::Frame,
         WlBuffer,
     )>,
     dma: ZwpLinuxDmabufV1,
-    screencopy_manager: ZwlrScreencopyManagerV1,
     wl_output: Option<WlOutput>,
-    enc: EncConstructionStage,
+    enc: EncConstructionStage<S>,
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
     quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
     dri_device: Option<String>,
+    gm: GlobalList,
 }
 
 struct OutputProbeState {
@@ -466,16 +533,21 @@ struct OutputProbeState {
     outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>, // none for disabled
 }
 
-enum EncConstructionStage {
+enum EncConstructionStage<S> {
     ProbingOutputs(OutputProbeState),
-    EverythingButFormat { output: OutputInfo, roi: Rect },
-    Complete(EncState),
+    EverythingButFormat {
+        output: OutputInfo,
+        roi: Rect,
+        cap: S,
+    },
+    Complete(EncState, S),
+    Intermediate,
 }
-impl EncConstructionStage {
+impl<S> EncConstructionStage<S> {
     #[track_caller]
-    fn unwrap(&mut self) -> &mut EncState {
-        if let EncConstructionStage::Complete(enc) = self {
-            enc
+    fn unwrap(&mut self) -> (&mut EncState, &mut S) {
+        if let EncConstructionStage::Complete(enc, s) = self {
+            (enc, s)
         } else {
             panic!("unwrap on non-complete EncConstructionStage")
         }
@@ -487,197 +559,7 @@ enum HistoryState {
     Recording(i64), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset (in nanoseconds), which is required when using history. If a stream is not present, then assume 0 offset
 }
 
-impl Dispatch<ZwlrScreencopyManagerV1, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrScreencopyManagerV1,
-        _event: <ZwlrScreencopyManagerV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &wayland_client::QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<ZwpLinuxDmabufV1, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpLinuxDmabufV1,
-        _event: <ZwpLinuxDmabufV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &wayland_client::QueueHandle<Self>,
-    ) {
-    }
-}
-
-fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> Pixel {
-    match dmabuf {
-        drm_fourcc::DrmFourcc::Xrgb8888 => Pixel::BGRZ,
-        drm_fourcc::DrmFourcc::Xrgb2101010 => Pixel::X2RGB10LE,
-        f => unimplemented!("fourcc {f:?}"),
-    }
-}
-
-impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        capture: &ZwlrScreencopyFrameV1,
-        event: <ZwlrScreencopyFrameV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &wayland_client::QueueHandle<Self>,
-    ) {
-        debug!("zwlr-screencopy-frame event: {:?} {event:?}", capture.id());
-        match event {
-            zwlr_screencopy_frame_v1::Event::Ready {
-                tv_sec_hi,
-                tv_sec_lo,
-                tv_nsec,
-            } => {
-                state.fps_counter.on_frame();
-
-                let (mut surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
-                    state.surfaces_owned_by_compositor.pop_front().unwrap();
-
-                drop(drop_mapping);
-                destroy_buffer_params.destroy();
-                destroy_frame.destroy();
-                destroy_buffer.destroy();
-
-                let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
-                let pts_abs = secs * 1_000_000_000 + i64::from(tv_nsec);
-
-                let enc = state.enc.unwrap();
-
-                if state.starting_timestamp.is_none() {
-                    state.starting_timestamp = Some(pts_abs);
-
-                    // start audio when we get the first timestamp so it's properly sync'd
-                    if let Some(audio) = &mut enc.audio {
-                        audio.start();
-                    }
-                }
-                let pts = pts_abs - state.starting_timestamp.unwrap();
-                surf.set_pts(Some(pts));
-
-                unsafe {
-                    (*surf.as_mut_ptr()).time_base.num = 1;
-                    (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
-                }
-
-                enc.push(surf);
-
-                state.queue_copy(qhandle);
-            }
-            zwlr_screencopy_frame_v1::Event::BufferDone => {}
-            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
-                format,
-                width: dmabuf_width,
-                height: dmabuf_height,
-            } => {
-                match &state.enc {
-                    EncConstructionStage::ProbingOutputs { .. } => unreachable!(
-                        "Oops, somehow created a screencopy frame without initial enc state stuff?"
-                    ),
-                    EncConstructionStage::EverythingButFormat { output, roi } => {
-                        state.enc = EncConstructionStage::Complete(
-                            match EncState::new(
-                                &state.args,
-                                dmabuf_to_av(
-                                    drm_fourcc::DrmFourcc::try_from(format)
-                                        .expect("Unknown fourcc"),
-                                ),
-                                output.refresh,
-                                output.transform,
-                                (dmabuf_width as i32, dmabuf_height as i32),
-                                *roi,
-                                Arc::clone(&state.sigusr1_flag),
-                                state
-                                    .dri_device
-                                    .as_ref()
-                                    .expect("somehow got screenrec before getting DRI device?"),
-                            ) {
-                                Ok(enc) => enc,
-                                Err(e) => {
-                                    eprintln!("failed to create encoder(s): {}", e);
-                                    state.quit_flag.store(1, Ordering::SeqCst);
-                                    return;
-                                }
-                            },
-                        );
-                    }
-                    EncConstructionStage::Complete(_) => {}
-                }
-
-                let enc = state.enc.unwrap();
-
-                let surf = enc.frames_rgb.alloc().unwrap();
-
-                let (desc, mapping) = map_drm(&surf);
-
-                let modifier = desc.objects[0].format_modifier.to_be_bytes();
-                let stride = desc.layers[0].planes[0].pitch as u32;
-                let fd = unsafe { BorrowedFd::borrow_raw(desc.objects[0].fd) };
-
-                let dma_params = state.dma.create_params(qhandle, ());
-                dma_params.add(
-                    fd,
-                    0,
-                    0,
-                    stride,
-                    u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-                    u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-                );
-
-                let buf = dma_params.create_immed(
-                    dmabuf_width as i32,
-                    dmabuf_height as i32,
-                    format,
-                    zwp_linux_buffer_params_v1::Flags::empty(),
-                    qhandle,
-                    (),
-                );
-
-                if state.args.damage {
-                    capture.copy_with_damage(&buf);
-                } else {
-                    capture.copy(&buf);
-                }
-
-                state.surfaces_owned_by_compositor.push_back((
-                    surf,
-                    mapping,
-                    dma_params,
-                    capture.clone(),
-                    buf,
-                ));
-            }
-            zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
-            zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
-            zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
-            zwlr_screencopy_frame_v1::Event::Failed => {
-                eprintln!("Failed to screencopy!");
-                state.quit_flag.store(1, Ordering::SeqCst)
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwpLinuxBufferParamsV1, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwpLinuxBufferParamsV1,
-        _event: <ZwpLinuxBufferParamsV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<WlBuffer, ()> for State {
+impl<S: CaptureSource> Dispatch<WlBuffer, ()> for State<S> {
     fn event(
         _state: &mut Self,
         _proxy: &WlBuffer,
@@ -689,7 +571,7 @@ impl Dispatch<WlBuffer, ()> for State {
     }
 }
 
-impl Dispatch<WlRegistry, GlobalListContents> for State {
+impl<S: CaptureSource> Dispatch<WlRegistry, GlobalListContents> for State<S> {
     fn event(
         _state: &mut Self,
         _proxy: &WlRegistry,
@@ -701,11 +583,23 @@ impl Dispatch<WlRegistry, GlobalListContents> for State {
     }
 }
 
-impl Dispatch<WlRegistry, ()> for State {
+impl<S: CaptureSource> Dispatch<ZwpLinuxDmabufV1, ()> for State<S> {
     fn event(
         _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: <WlRegistry as Proxy>::Event,
+        _proxy: &ZwpLinuxDmabufV1,
+        _event: <ZwpLinuxDmabufV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &wayland_client::QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl<S: CaptureSource> Dispatch<ZxdgOutputManagerV1, ()> for State<S> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZxdgOutputManagerV1,
+        _event: <ZxdgOutputManagerV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -713,7 +607,102 @@ impl Dispatch<WlRegistry, ()> for State {
     }
 }
 
-impl Dispatch<WlOutput, ()> for State {
+impl<S: CaptureSource + 'static> Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State<S> {
+    fn event(
+        state: &mut Self,
+        proxy: &ZxdgOutputV1,
+        event: <ZxdgOutputV1 as Proxy>::Event,
+        out_id: &TypedObjectId<WlOutput>,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        debug!("zxdg-output event: {:?} {event:?}", proxy.id());
+        match event {
+            zxdg_output_v1::Event::Name { name } => {
+                state.update_output_info_wl_output(out_id, |info| info.name = Some(name));
+            }
+            zxdg_output_v1::Event::LogicalPosition { x, y } => {
+                state.update_output_info_wl_output(out_id, |info| info.loc = Some((x, y)));
+            }
+            zxdg_output_v1::Event::LogicalSize { width, height } => {
+                state.update_output_info_wl_output(out_id, |info| {
+                    info.logical_size = Some((width, height))
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+impl<S> Dispatch<ZwlrOutputManagerV1, ()> for State<S>
+where
+    S: CaptureSource + 'static,
+{
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrOutputManagerV1,
+        event: <ZwlrOutputManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        debug!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
+        if let zwlr_output_manager_v1::Event::Done { .. } = event {
+            state.zwlr_ouptut_info_done(qhandle);
+        }
+    }
+
+    event_created_child!(State<S>, ZwlrOutputManagerV1, [
+        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ()),
+    ]);
+}
+
+impl<S> Dispatch<ZwlrOutputHeadV1, ()> for State<S>
+where
+    S: CaptureSource + 'static,
+{
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrOutputHeadV1,
+        event: <ZwlrOutputHeadV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        debug!("zwlr-output-head event: {:?} {event:?}", proxy.id());
+        let id = TypedObjectId::new(proxy);
+        match event {
+            zwlr_output_head_v1::Event::Name { name } => {
+                state.update_output_info_zwlr_head(id, |data| data.name = Some(name));
+            }
+            zwlr_output_head_v1::Event::Scale { scale } => {
+                state.update_output_info_zwlr_head(id, |data| data.scale = Some(scale));
+            }
+            zwlr_output_head_v1::Event::Enabled { enabled } => {
+                state.update_output_info_zwlr_head(id, |data| data.enabled = Some(enabled != 0));
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(State<S>, ZwlrOutputHeadV1, [
+        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ()),
+    ]);
+}
+
+impl<S: CaptureSource> Dispatch<ZwlrOutputModeV1, ()> for State<S> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ZwlrOutputModeV1,
+        _event: <ZwlrOutputModeV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl<S: CaptureSource + 'static> Dispatch<WlOutput, ()> for State<S> {
     fn event(
         state: &mut Self,
         proxy: &WlOutput,
@@ -754,11 +743,11 @@ impl Dispatch<WlOutput, ()> for State {
     }
 }
 
-impl Dispatch<ZxdgOutputManagerV1, ()> for State {
+impl<S: CaptureSource> Dispatch<ZwpLinuxBufferParamsV1, ()> for State<S> {
     fn event(
         _state: &mut Self,
-        _proxy: &ZxdgOutputManagerV1,
-        _event: <ZxdgOutputManagerV1 as Proxy>::Event,
+        _proxy: &ZwpLinuxBufferParamsV1,
+        _event: <ZwpLinuxBufferParamsV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -766,88 +755,11 @@ impl Dispatch<ZxdgOutputManagerV1, ()> for State {
     }
 }
 
-impl Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>> for State {
-    fn event(
-        state: &mut Self,
-        proxy: &ZxdgOutputV1,
-        event: <ZxdgOutputV1 as Proxy>::Event,
-        out_id: &TypedObjectId<WlOutput>,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zxdg-output event: {:?} {event:?}", proxy.id());
-        match event {
-            zxdg_output_v1::Event::Name { name } => {
-                state.update_output_info_wl_output(out_id, |info| info.name = Some(name));
-            }
-            zxdg_output_v1::Event::LogicalPosition { x, y } => {
-                state.update_output_info_wl_output(out_id, |info| info.loc = Some((x, y)));
-            }
-            zxdg_output_v1::Event::LogicalSize { width, height } => {
-                state.update_output_info_wl_output(out_id, |info| {
-                    info.logical_size = Some((width, height))
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwlrOutputManagerV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrOutputManagerV1,
-        event: <ZwlrOutputManagerV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
-        if let zwlr_output_manager_v1::Event::Done { .. } = event {
-            state.zwlr_ouptut_info_done(qhandle);
-        }
-    }
-
-    event_created_child!(State, ZwlrOutputManagerV1, [
-        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ()),
-    ]);
-}
-
-impl Dispatch<ZwlrOutputHeadV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrOutputHeadV1,
-        event: <ZwlrOutputHeadV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwlr-output-head event: {:?} {event:?}", proxy.id());
-        let id = TypedObjectId::new(proxy);
-        match event {
-            zwlr_output_head_v1::Event::Name { name } => {
-                state.update_output_info_zwlr_head(id, |data| data.name = Some(name));
-            }
-            zwlr_output_head_v1::Event::Scale { scale } => {
-                state.update_output_info_zwlr_head(id, |data| data.scale = Some(scale));
-            }
-            zwlr_output_head_v1::Event::Enabled { enabled } => {
-                state.update_output_info_zwlr_head(id, |data| data.enabled = Some(enabled != 0));
-            }
-            _ => {}
-        }
-    }
-
-    event_created_child!(State, ZwlrOutputHeadV1, [
-        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ()),
-    ]);
-}
-
-impl Dispatch<ZwlrOutputModeV1, ()> for State {
+impl<S: CaptureSource> Dispatch<WlRegistry, ()> for State<S> {
     fn event(
         _state: &mut Self,
-        _proxy: &ZwlrOutputModeV1,
-        _event: <ZwlrOutputModeV1 as Proxy>::Event,
+        _proxy: &WlRegistry,
+        _event: <WlRegistry as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -855,56 +767,15 @@ impl Dispatch<ZwlrOutputModeV1, ()> for State {
     }
 }
 
-#[link(name = "drm")]
-extern "C" {
-    pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
-}
-
-impl Dispatch<WpDrmLeaseDeviceV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        proxy: &WpDrmLeaseDeviceV1,
-        event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
-        if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
-            unsafe {
-                let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
-                state.dri_device = Some(if ptr.is_null() {
-                    warn!(
-                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
-                    );
-                    "/dev/dri/renderD128".to_owned()
-                } else {
-                    let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
-                    libc::free(ptr as *mut _);
-                    ret
-                });
-            };
-        }
-    }
-
-    event_created_child!(State, WpDrmLeaseDeviceV1, [
-        wp_drm_lease_device_v1::EVT_CONNECTOR_OPCODE => (WpDrmLeaseConnectorV1, ()),
-    ]);
-}
-
-impl Dispatch<WpDrmLeaseConnectorV1, ()> for State {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpDrmLeaseConnectorV1,
-        _event: <WpDrmLeaseConnectorV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
+fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> Pixel {
+    match dmabuf {
+        drm_fourcc::DrmFourcc::Xrgb8888 => Pixel::BGRZ,
+        drm_fourcc::DrmFourcc::Xrgb2101010 => Pixel::X2RGB10LE,
+        f => unimplemented!("fourcc {f:?}"),
     }
 }
 
-impl State {
+impl<S: CaptureSource + 'static> State<S> {
     fn new(
         conn: &Connection,
         args: Args,
@@ -914,10 +785,8 @@ impl State {
         let display = conn.display();
 
         let (gm, queue) = registry_queue_init(conn).unwrap();
-        let eq: QueueHandle<State> = queue.handle();
+        let eq: QueueHandle<State<S>> = queue.handle();
 
-        let man: ZwlrScreencopyManagerV1 = gm
-            .bind(&eq, 3..=ZwlrScreencopyManagerV1::interface().version, ()).context("your compositor does not support zwlr-screencopy-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
         let dma: ZwpLinuxDmabufV1 = gm
             .bind(&eq, 4..=ZwpLinuxDmabufV1::interface().version, ())
             .context("your compositor does not support zwp-linux-dmabuf and therefore is not support by wl-screenrec. See the README for supported compositors")?;
@@ -982,7 +851,6 @@ impl State {
             State {
                 surfaces_owned_by_compositor: VecDeque::new(),
                 dma,
-                screencopy_manager: man,
                 enc: EncConstructionStage::ProbingOutputs(OutputProbeState {
                     partial_outputs,
                     partial_outputs_wlr: HashMap::new(),
@@ -995,16 +863,94 @@ impl State {
                 quit_flag,
                 sigusr1_flag,
                 dri_device,
+                gm,
             },
             queue,
         ))
     }
 
-    fn queue_copy(&mut self, eq: &QueueHandle<State>) {
-        // creating this triggers the linux_dmabuf event, which is where we allocate etc
-        let _capture =
-            self.screencopy_manager
-                .capture_output(1, self.wl_output.as_ref().unwrap(), eq, ());
+    fn on_copy_src_ready(
+        &mut self,
+        dmabuf_width: u32,
+        dmabuf_height: u32,
+        format: u32,
+        qhandle: &QueueHandle<State<S>>,
+        frame: &S::Frame,
+    ) {
+        match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
+            EncConstructionStage::ProbingOutputs { .. } => unreachable!(
+                "Oops, somehow created a screencopy frame without initial enc state stuff?"
+            ),
+            EncConstructionStage::EverythingButFormat { output, roi, cap } => {
+                let capture_pixfmt =
+                    dmabuf_to_av(drm_fourcc::DrmFourcc::try_from(format).expect("Unknown fourcc"));
+                self.enc = EncConstructionStage::Complete(
+                    match EncState::new(
+                        &self.args,
+                        capture_pixfmt,
+                        output.refresh,
+                        output.transform,
+                        (dmabuf_width as i32, dmabuf_height as i32),
+                        roi,
+                        Arc::clone(&self.sigusr1_flag),
+                        self.dri_device
+                            .as_ref()
+                            .expect("somehow got screenrec before getting DRI device?"),
+                    ) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            eprintln!("failed to create encoder(s): {}", e);
+                            self.quit_flag.store(1, SeqCst);
+                            return;
+                        }
+                    },
+                    cap,
+                );
+            }
+            EncConstructionStage::Complete(a, b) => {
+                self.enc = EncConstructionStage::Complete(a, b) // put it back
+            }
+            EncConstructionStage::Intermediate => panic!("enc left in intermediate state"),
+        }
+
+        let (enc, cap) = self.enc.unwrap();
+
+        let surf = enc.frames_rgb.alloc().unwrap();
+
+        let (desc, mapping) = map_drm(&surf);
+
+        let modifier = desc.objects[0].format_modifier.to_be_bytes();
+        let stride = desc.layers[0].planes[0].pitch as u32;
+        let fd = unsafe { BorrowedFd::borrow_raw(desc.objects[0].fd) };
+
+        let dma_params = self.dma.create_params(qhandle, ());
+        dma_params.add(
+            fd,
+            0,
+            0,
+            stride,
+            u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+            u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+        );
+
+        let buf = dma_params.create_immed(
+            dmabuf_width as i32,
+            dmabuf_height as i32,
+            format,
+            zwp_linux_buffer_params_v1::Flags::empty(),
+            qhandle,
+            (),
+        );
+
+        cap.queue_copy_frame(self.args.damage, &buf, frame);
+
+        self.surfaces_owned_by_compositor.push_back((
+            surf,
+            mapping,
+            dma_params,
+            frame.clone(),
+            buf,
+        ));
     }
 
     fn update_output_info_wl_output(
@@ -1021,7 +967,7 @@ impl State {
     fn done_output_info_wl_output(
         &mut self,
         id: TypedObjectId<WlOutput>,
-        qhandle: &QueueHandle<State>,
+        qhandle: &QueueHandle<Self>,
     ) {
         let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
             p
@@ -1088,7 +1034,7 @@ impl State {
         }
     }
 
-    fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<State>) {
+    fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<Self>) {
         let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
             p
         } else {
@@ -1139,7 +1085,7 @@ impl State {
         self.start_if_output_probe_complete(qhandle);
     }
 
-    fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<State>) {
+    fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<Self>) {
         let p = if let EncConstructionStage::ProbingOutputs(p) = &self.enc {
             p
         } else {
@@ -1229,11 +1175,65 @@ impl State {
         info!("Using output {}", output.name);
 
         self.wl_output = Some(output.output.clone());
+
+        let cap = match S::new(&self.gm, qhandle, output.output.clone()) {
+            Ok(cap) => cap,
+            Err(err) => {
+                eprintln!("failed to create capture state: {}", err);
+                self.quit_flag.store(1, SeqCst);
+                return;
+            }
+        };
+
+        cap.queue_capture_frame(qhandle);
         self.enc = EncConstructionStage::EverythingButFormat {
             output: output.clone(),
             roi,
+            cap,
         };
-        self.queue_copy(qhandle);
+    }
+
+    fn on_copy_complete(
+        &mut self,
+        qhandle: &QueueHandle<Self>,
+        tv_sec_hi: u32,
+        tv_sec_lo: u32,
+        tv_nsec: u32,
+    ) {
+        let (enc, cap) = self.enc.unwrap();
+
+        self.fps_counter.on_frame();
+
+        let (mut surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
+            self.surfaces_owned_by_compositor.pop_front().unwrap();
+
+        drop(drop_mapping);
+        destroy_buffer_params.destroy();
+        cap.on_done_with_frame(destroy_frame);
+        destroy_buffer.destroy();
+
+        let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
+        let pts_abs = secs * 1_000_000_000 + i64::from(tv_nsec);
+
+        if self.starting_timestamp.is_none() {
+            self.starting_timestamp = Some(pts_abs);
+
+            // start audio when we get the first timestamp so it's properly sync'd
+            if let Some(audio) = &mut enc.audio {
+                audio.start();
+            }
+        }
+        let pts = pts_abs - self.starting_timestamp.unwrap();
+        surf.set_pts(Some(pts));
+
+        unsafe {
+            (*surf.as_mut_ptr()).time_base.num = 1;
+            (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
+        }
+
+        enc.push(surf);
+
+        cap.queue_capture_frame(qhandle);
     }
 }
 
@@ -1953,19 +1953,20 @@ fn main() {
         }
     };
 
-    let (mut state, mut queue) = match State::new(&conn, args, quit_flag.clone(), sigusr1_flag) {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("{e}");
-            exit(1);
-        }
-    };
+    let (mut state, mut queue) =
+        match State::<CapWlrScreencopy>::new(&conn, args, quit_flag.clone(), sigusr1_flag) {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!("{e}");
+                exit(1);
+            }
+        };
 
     while quit_flag.load(Ordering::SeqCst) == usize::MAX {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
-    if let EncConstructionStage::Complete(enc) = &mut state.enc {
+    if let EncConstructionStage::Complete(enc, _) = &mut state.enc {
         enc.flush();
     }
 
