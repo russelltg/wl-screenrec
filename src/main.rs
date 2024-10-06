@@ -26,6 +26,7 @@ use std::{
 
 use anyhow::{bail, format_err, Context};
 use audio::AudioHandle;
+use cap_ext_image_copy::CapExtImageCopy;
 use cap_wlr_screencopy::CapWlrScreencopy;
 use clap::{command, ArgAction, CommandFactory, Parser};
 use ffmpeg::{
@@ -229,6 +230,13 @@ pub struct Args {
         help = "print completions for the specified shell to stdout"
     )]
     completions_generator: Option<clap_complete::Shell>,
+
+    #[clap(
+        long = "experimental-ext-image-copy-capture",
+        help = "use the new ext-image-copy-capture protocol",
+        default_value = "false"
+    )]
+    ext_image_copy_capture: bool,
 }
 
 trait CaptureSource: Sized {
@@ -1903,6 +1911,14 @@ fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
 
 fn main() {
     let args = Args::parse();
+    if args.ext_image_copy_capture {
+        execute::<CapExtImageCopy>(args);
+    } else {
+        execute::<CapWlrScreencopy>(args);
+    }
+}
+
+fn execute<S: CaptureSource + 'static>(args: Args) {
     if let Some(generator) = args.completions_generator {
         let mut command = Args::command();
         let bin_name = command.get_name().to_string();
@@ -1972,12 +1988,8 @@ fn main() {
         }
     };
 
-    let (mut state, mut queue) = match State::<cap_ext_image_copy::CapExtImageCopy>::new(
-        &conn,
-        args,
-        quit_flag.clone(),
-        sigusr1_flag,
-    ) {
+    let (mut state, mut queue) = match State::<S>::new(&conn, args, quit_flag.clone(), sigusr1_flag)
+    {
         Ok(res) => res,
         Err(e) => {
             eprintln!("{e}");
