@@ -79,6 +79,7 @@ mod avhw;
 use avhw::{AvHwDevCtx, AvHwFrameCtx};
 
 mod audio;
+mod cap_ext_image_copy;
 mod cap_wlr_screencopy;
 mod fifo;
 mod transform;
@@ -238,7 +239,10 @@ trait CaptureSource: Sized {
         eq: &QueueHandle<State<Self>>,
         output: WlOutput,
     ) -> anyhow::Result<Self>;
-    fn queue_capture_frame(&self, eq: &QueueHandle<State<Self>>);
+    fn queue_capture_frame(
+        &self,
+        eq: &QueueHandle<State<Self>>,
+    ) -> Option<(u32, u32, u32, Self::Frame)>;
     fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
     fn on_done_with_frame(&self, f: Self::Frame);
 }
@@ -550,6 +554,15 @@ impl<S> EncConstructionStage<S> {
             (enc, s)
         } else {
             panic!("unwrap on non-complete EncConstructionStage")
+        }
+    }
+
+    #[track_caller]
+    fn unwrap_cap(&mut self) -> &mut S {
+        match self {
+            EncConstructionStage::EverythingButFormat { cap, .. } => cap,
+            EncConstructionStage::Complete(_, cap) => cap,
+            _ => panic!("no capture source yet"),
         }
     }
 }
@@ -1185,12 +1198,16 @@ impl<S: CaptureSource + 'static> State<S> {
             }
         };
 
-        cap.queue_capture_frame(qhandle);
+        let queue_ret = cap.queue_capture_frame(qhandle);
         self.enc = EncConstructionStage::EverythingButFormat {
             output: output.clone(),
             roi,
             cap,
         };
+
+        if let Some((w, h, fmt, frame)) = queue_ret {
+            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+        }
     }
 
     fn on_copy_complete(
@@ -1233,7 +1250,9 @@ impl<S: CaptureSource + 'static> State<S> {
 
         enc.push(surf);
 
-        cap.queue_capture_frame(qhandle);
+        if let Some((w, h, fmt, frame)) = cap.queue_capture_frame(qhandle) {
+            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+        }
     }
 }
 
@@ -1953,14 +1972,18 @@ fn main() {
         }
     };
 
-    let (mut state, mut queue) =
-        match State::<CapWlrScreencopy>::new(&conn, args, quit_flag.clone(), sigusr1_flag) {
-            Ok(res) => res,
-            Err(e) => {
-                eprintln!("{e}");
-                exit(1);
-            }
-        };
+    let (mut state, mut queue) = match State::<cap_ext_image_copy::CapExtImageCopy>::new(
+        &conn,
+        args,
+        quit_flag.clone(),
+        sigusr1_flag,
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            eprintln!("{e}");
+            exit(1);
+        }
+    };
 
     while quit_flag.load(Ordering::SeqCst) == usize::MAX {
         queue.blocking_dispatch(&mut state).unwrap();
