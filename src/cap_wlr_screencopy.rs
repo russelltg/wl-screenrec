@@ -91,12 +91,14 @@ impl CaptureSource for CapWlrScreencopy {
         }
     }
 
-    fn queue_capture_frame(&self, eq: &QueueHandle<State<Self>>) {
+    fn queue_capture_frame(&self, eq: &QueueHandle<State<Self>>) -> Option<(u32, u32, u32, Self::Frame)> {
         // creating this triggers the linux_dmabuf event, which is where we allocate etc
 
         let _capture = self
             .screencopy_manager
             .capture_output(1, &self.output, eq, ());
+
+        None
     }
 
     fn on_done_with_frame(&self, f: Self::Frame) {
