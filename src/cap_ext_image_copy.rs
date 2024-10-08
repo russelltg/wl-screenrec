@@ -93,8 +93,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
     ) {
         use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::Event::*;
         match event {
-            Transform { .. } => {},
-            Damage { .. } => {}, // TODO: maybe this is how you implement damage
+            Transform { .. } => {}
+            Damage { .. } => {} // TODO: maybe this is how you implement damage
             PresentationTime {
                 tv_sec_hi,
                 tv_sec_lo,
