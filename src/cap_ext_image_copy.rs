@@ -1,5 +1,5 @@
 use anyhow::Context;
-use log::info;
+use log_once::warn_once;
 use wayland_client::{
     globals::GlobalList, protocol::wl_output::WlOutput, Dispatch, Proxy, QueueHandle,
 };
@@ -159,10 +159,8 @@ impl CaptureSource for CapExtImageCopy {
         &self,
         eq: &QueueHandle<crate::State<Self>>,
     ) -> Option<(u32, u32, u32, Self::Frame)> {
-        info!("queue_capture_frame");
         if let (Some((w, h)), Some((fmt, _mod))) = (self.size, self.dmabuf_format.as_ref()) {
             let frame = self.output_capture_session.create_frame(eq, ());
-            // dbg!(_mod);
             Some((w, h, *fmt, frame))
         } else {
             None
@@ -175,7 +173,9 @@ impl CaptureSource for CapExtImageCopy {
         buf: &wayland_client::protocol::wl_buffer::WlBuffer,
         cap: &Self::Frame,
     ) {
-        info!("queue_copy_frame");
+        if !damage {
+            warn_once!("--no-damage is not implemented in ext-image-capture");
+        }
         cap.attach_buffer(buf);
         cap.capture();
     }
