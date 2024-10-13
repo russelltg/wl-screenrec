@@ -144,7 +144,7 @@ impl CaptureSource for CapWlrScreencopy {
 
         // if this doesn't exist, it will get logged later anyways
         let _ = gm.bind::<WpDrmLeaseDeviceV1, _, _>(
-            &eq,
+            eq,
             WpDrmLeaseDeviceV1::interface().version..=WpDrmLeaseDeviceV1::interface().version,
             (),
         );

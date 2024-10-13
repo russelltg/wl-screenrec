@@ -1440,16 +1440,10 @@ impl EncState {
             DrmFourcc::Xbgr8888,
             DrmFourcc::Xrgb2101010,
         ] {
-            let is_fmt_supported = capture_formats
-                .iter()
-                .find(|p| {
-                    p.fourcc == DrmFourcc::Xrgb8888
-                        && p.modifiers
-                            .iter()
-                            .find(|m| **m == DrmModifier::LINEAR)
-                            .is_some()
-                })
-                .is_some();
+            let is_fmt_supported = capture_formats.iter().any(|p| {
+                p.fourcc == DrmFourcc::Xrgb8888
+                    && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
+            });
 
             if is_fmt_supported {
                 selected_format = Some(DmabufFormat {

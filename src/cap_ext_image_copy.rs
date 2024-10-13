@@ -106,7 +106,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                 let probed = if let ExtImageCopyState::Probing(formats, size, dev) =
                     &state.enc.unwrap_cap().state
                 {
-                    Some((formats.clone(), size.clone(), dev.clone()))
+                    Some((formats.clone(), size, dev.clone()))
                 } else {
                     None
                 };
