@@ -1,22 +1,16 @@
-use std::{
-    ffi::CString,
-    path::Path,
-    ptr::{null, null_mut},
-};
+use std::{ffi::CString, path::Path, ptr::null_mut};
 
+use ash::vk;
 use ffmpeg::{
     dict,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
         av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext,
-        VkStructureType::VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
     },
     format::Pixel,
     frame,
 };
-use ffmpeg_sys_next::{
-    AVVulkanFramesContext, VkImageDrmFormatModifierListCreateInfoEXT, VkImageTiling,
-};
+use ffmpeg_sys_next::AVVulkanFramesContext;
 
 use crate::DrmModifier;
 
@@ -99,13 +93,12 @@ impl AvHwDevCtx {
             if self.fmt == Pixel::VULKAN {
                 let vk_ptr = hwframe_casted.hwctx as *mut AVVulkanFramesContext;
 
-                (*vk_ptr).tiling = VkImageTiling::VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+                (*vk_ptr).tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
 
-                let mut create_info = VkImageDrmFormatModifierListCreateInfoEXT {
-                    sType: VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT,
-                    pNext: null(),
-                    drmFormatModifierCount: modifiers.len() as u32,
-                    pDrmFormatModifiers: modifiers.as_ptr() as _,
+                let mut create_info = vk::ImageDrmFormatModifierListCreateInfoEXT {
+                    drm_format_modifier_count: modifiers.len() as u32,
+                    p_drm_format_modifiers: modifiers.as_ptr() as _,
+                    ..Default::default()
                 };
                 (*vk_ptr).create_pnext = &mut create_info as *mut _ as _;
             }
