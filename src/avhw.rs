@@ -1,4 +1,4 @@
-use std::{ffi::CString, ptr::null_mut};
+use std::{ffi::CString, path::Path, ptr::null_mut};
 
 use ffmpeg::{
     dict,
@@ -15,7 +15,7 @@ pub struct AvHwDevCtx {
 }
 
 impl AvHwDevCtx {
-    pub fn new_libva(dri_device: &str) -> Result<Self, ffmpeg::Error> {
+    pub fn new_libva(dri_device: &Path) -> Result<Self, ffmpeg::Error> {
         unsafe {
             let mut hw_device_ctx = null_mut();
 
@@ -23,7 +23,7 @@ impl AvHwDevCtx {
                 "connection_type" => "drm"
             };
 
-            let dev_cstr = CString::new(dri_device).unwrap();
+            let dev_cstr = CString::new(dri_device.to_str().unwrap()).unwrap();
             let sts = av_hwdevice_ctx_create(
                 &mut hw_device_ctx,
                 ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,

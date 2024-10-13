@@ -30,7 +30,6 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 ffmpeg-next = "7.0.1"
 ffmpeg-sys-next = "7.0.0" # need direct dep on -sys to get metadata to consume in build.rs
 thiserror = "1.0.38"
-drm-fourcc = "2.2.0"
 human-size = "0.4.2"
 signal-hook = "0.3.15"
 anyhow = "1.0.71"
@@ -39,6 +38,7 @@ simplelog = "0.12.1"
 log = "0.4.21"
 clap_complete = "4.5.8"
 log-once = "0.4.1"
+drm = "0.14.0"
 
 
 [dev-dependencies]
