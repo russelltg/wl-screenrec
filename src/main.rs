@@ -9,8 +9,8 @@ use std::{
     marker::PhantomData,
     mem::{self, swap},
     num::ParseIntError,
-    os::fd::{AsRawFd, BorrowedFd},
-    path::{Path, PathBuf},
+    os::fd::BorrowedFd,
+    path::Path,
     process::exit,
     ptr::null_mut,
     str::from_utf8_unchecked,
@@ -62,15 +62,9 @@ use wayland_client::{
     ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
-    wp::{
-        drm_lease::v1::client::{
-            wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1,
-            wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
-        },
-        linux_dmabuf::zv1::client::{
-            zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
-            zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-        },
+    wp::linux_dmabuf::zv1::client::{
+        zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
+        zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
     },
     xdg::xdg_output::zv1::client::{
         zxdg_output_manager_v1::ZxdgOutputManagerV1,
@@ -138,7 +132,7 @@ pub struct Args {
 
     #[clap(
         long,
-        help = "which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol, if present. if not present, /dev/dri/renderD128 is guessed"
+        help = "which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol when using wlr-screencopy, and from ext-image-copy-capture-session if using ext-image-copy-capture, if present. if not present, /dev/dri/renderD128 is guessed"
     )]
     dri_device: Option<String>,
 
@@ -530,53 +524,6 @@ extern "C" {
     pub fn drmGetFormatModifierName(modifier: u64) -> *mut libc::c_char;
 }
 
-impl<S> Dispatch<WpDrmLeaseDeviceV1, ()> for State<S>
-where
-    S: CaptureSource + 'static,
-{
-    fn event(
-        state: &mut Self,
-        proxy: &WpDrmLeaseDeviceV1,
-        event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
-        if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
-            unsafe {
-                let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
-                state.dri_device = Some(if ptr.is_null() {
-                    warn!(
-                        "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
-                    );
-                    PathBuf::from("/dev/dri/renderD128".to_owned())
-                } else {
-                    let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
-                    libc::free(ptr as *mut _);
-                    PathBuf::from(ret)
-                });
-            };
-        }
-    }
-
-    event_created_child!(State<S>, WpDrmLeaseDeviceV1, [
-        wp_drm_lease_device_v1::EVT_CONNECTOR_OPCODE => (WpDrmLeaseConnectorV1, ()),
-    ]);
-}
-
-impl<S: CaptureSource> Dispatch<WpDrmLeaseConnectorV1, ()> for State<S> {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WpDrmLeaseConnectorV1,
-        _event: <WpDrmLeaseConnectorV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-    }
-}
-
 struct State<S: CaptureSource> {
     pub(crate) surfaces_owned_by_compositor: VecDeque<(
         frame::Video,
@@ -593,7 +540,6 @@ struct State<S: CaptureSource> {
     args: Args,
     quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
-    dri_device: Option<PathBuf>,
     gm: GlobalList,
 }
 
@@ -885,22 +831,6 @@ impl<S: CaptureSource + 'static> State<S> {
             )
             .context("your compositor does not support zwlr-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
-        let dri_device = if let Some(dev) = &args.dri_device {
-            Some(PathBuf::from(dev.clone()))
-        } else if gm
-            .bind::<WpDrmLeaseDeviceV1, _, _>(
-                &eq,
-                WpDrmLeaseDeviceV1::interface().version..=WpDrmLeaseDeviceV1::interface().version,
-                (),
-            )
-            .is_err()
-        {
-            warn!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128. pass --dri-device if this is incorrect or to suppress this warning");
-            Some(PathBuf::from("/dev/dri/renderD128".to_owned()))
-        } else {
-            None // will be filled by the callback
-        };
-
         let mut partial_outputs = HashMap::new();
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
@@ -941,7 +871,6 @@ impl<S: CaptureSource + 'static> State<S> {
                 wl_output: None,
                 quit_flag,
                 sigusr1_flag,
-                dri_device,
                 gm,
             },
             queue,
@@ -1305,6 +1234,15 @@ impl<S: CaptureSource + 'static> State<S> {
         dri_device: Option<&Path>,
     ) -> Option<DmabufFormat> {
         debug!("Supported capture formats are {capture_formats:?}");
+        let dri_device = if let Some(dev) = &self.args.dri_device {
+            Path::new(dev)
+        } else if let Some(dev) = dri_device {
+            dev
+        } else {
+            warn!("dri device could not be auto-detected, using /dev/dri/renderD128. Pass --dri-device if this isn't correct or to suppress this warning");
+            Path::new("/dev/dri/renderD128")
+        };
+
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::EverythingButFormat { output, roi, cap } => {
                 let (enc, fmt) = match EncState::new(
@@ -1315,9 +1253,7 @@ impl<S: CaptureSource + 'static> State<S> {
                     (w as i32, h as i32),
                     roi,
                     Arc::clone(&self.sigusr1_flag),
-                    dri_device
-                        .or_else(|| self.dri_device.as_deref())
-                        .expect("somehow got screenrec before getting DRI device?"),
+                    dri_device,
                 ) {
                     Ok(enc) => enc,
                     Err(e) => {

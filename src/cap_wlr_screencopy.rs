@@ -1,19 +1,26 @@
-use std::sync::atomic::Ordering::SeqCst;
+use std::{ffi::CStr, os::fd::AsRawFd, path::PathBuf, sync::atomic::Ordering::SeqCst};
 
 use anyhow::Context;
 use drm::buffer::DrmFourcc;
 use log::debug;
 use wayland_client::{
+    event_created_child,
     globals::GlobalList,
     protocol::{wl_buffer::WlBuffer, wl_output::WlOutput},
     Connection, Dispatch, Proxy, QueueHandle,
+};
+use wayland_protocols::wp::drm_lease::v1::client::{
+    wp_drm_lease_connector_v1::WpDrmLeaseConnectorV1,
+    wp_drm_lease_device_v1::{self, WpDrmLeaseDeviceV1},
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
+use crate::{
+    drmGetRenderDeviceNameFromFd, CaptureSource, DmabufPotentialFormat, DrmModifier, State,
+};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(
@@ -55,13 +62,14 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                 let cap = state.enc.unwrap_cap();
                 if !cap.sent_format {
                     cap.sent_format = true;
+                    let device = cap.drm_device.clone();
                     state.negotiate_format(
                         &[DmabufPotentialFormat {
                             fourcc,
                             modifiers: vec![DrmModifier::LINEAR],
                         }],
                         (dmabuf_width, dmabuf_height),
-                        None,
+                        device.as_deref(),
                     );
                 }
                 state.on_copy_src_ready(dmabuf_width, dmabuf_height, fourcc, qhandle, capture);
@@ -78,10 +86,52 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
     }
 }
 
+impl Dispatch<WpDrmLeaseDeviceV1, ()> for State<CapWlrScreencopy> {
+    fn event(
+        state: &mut Self,
+        proxy: &WpDrmLeaseDeviceV1,
+        event: <WpDrmLeaseDeviceV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        debug!("zwp-drm-lease-device event: {:?} {event:?}", proxy.id());
+        if let wp_drm_lease_device_v1::Event::DrmFd { fd } = event {
+            unsafe {
+                let ptr = drmGetRenderDeviceNameFromFd(fd.as_raw_fd());
+
+                if !ptr.is_null() {
+                    let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
+                    libc::free(ptr as *mut _);
+
+                    state.enc.unwrap_cap().drm_device = Some(PathBuf::from(ret));
+                }
+            };
+        }
+    }
+
+    event_created_child!(State<CapWlrScreencopy>, WpDrmLeaseDeviceV1, [
+        wp_drm_lease_device_v1::EVT_CONNECTOR_OPCODE => (WpDrmLeaseConnectorV1, ()),
+    ]);
+}
+
+impl Dispatch<WpDrmLeaseConnectorV1, ()> for State<CapWlrScreencopy> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpDrmLeaseConnectorV1,
+        _event: <WpDrmLeaseConnectorV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 pub struct CapWlrScreencopy {
     screencopy_manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
     sent_format: bool,
+    drm_device: Option<PathBuf>,
 }
 impl CaptureSource for CapWlrScreencopy {
     fn new(
@@ -92,10 +142,18 @@ impl CaptureSource for CapWlrScreencopy {
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(eq, 3..=ZwlrScreencopyManagerV1::interface().version, ()).context("your compositor does not support zwlr-screencopy-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
+        // if this doesn't exist, it will get logged later anyways
+        let _ = gm.bind::<WpDrmLeaseDeviceV1, _, _>(
+            &eq,
+            WpDrmLeaseDeviceV1::interface().version..=WpDrmLeaseDeviceV1::interface().version,
+            (),
+        );
+
         Ok(Self {
             screencopy_manager: man,
             output,
             sent_format: false,
+            drm_device: None,
         })
     }
 
