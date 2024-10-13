@@ -10,7 +10,6 @@ Open an issue if something is not working, I'm happy to take a look.
 # System Requirements
 
 * wayland compositor supporting the following unstable protocols:
-  * [`wlr-output-management-unstable-v1`](https://wayland.app/protocols/wlr-output-management-unstable-v1) 
   * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1)
 
    [Sway](https://swaywm.org/), [Hyprland](https://hyprland.org/), and [wayfire](https://wayfire.org/) all meet this criteria.
