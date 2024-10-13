@@ -535,7 +535,7 @@ struct State<S: CaptureSource> {
 
 struct OutputProbeState {
     partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
-    outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>, // none for disabled
+    outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
 }
 
 enum EncConstructionStage<S> {
@@ -746,7 +746,6 @@ impl<S: CaptureSource + 'static> State<S> {
             .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
             .context("your compositor does not support zxdg-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
-
         let mut partial_outputs = HashMap::new();
         for g in gm.contents().clone_list() {
             if g.interface == WlOutput::interface().name {
@@ -900,7 +899,6 @@ impl<S: CaptureSource + 'static> State<S> {
 
         self.start_if_output_probe_complete(qhandle);
     }
-
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<Self>) {
         let p = if let EncConstructionStage::ProbingOutputs(p) = &self.enc {
