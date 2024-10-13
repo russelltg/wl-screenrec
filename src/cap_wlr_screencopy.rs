@@ -19,7 +19,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 };
 
 use crate::{
-    drmGetRenderDeviceNameFromFd, CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State
+    drmGetRenderDeviceNameFromFd, CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State,
 };
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {

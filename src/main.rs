@@ -53,7 +53,6 @@ use thiserror::Error;
 use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
-    event_created_child,
     globals::{registry_queue_init, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
@@ -1352,8 +1351,12 @@ impl EncState {
             #[cfg(not(ffmpeg_7_1))]
             bail!("You need ffmpeg 7.1+ to use vulkan encode");
 
-            info!("Opening vulkan device 0");
-            AvHwDevCtx::new_vulkan("0").map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
+            #[allow(unreachable_code)]
+            {
+                info!("Opening vulkan device 0");
+                AvHwDevCtx::new_vulkan("0")
+                    .map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
+            }
         } else {
             info!(
                 "Opening libva device from DRM device {}",
@@ -1774,8 +1777,6 @@ fn video_filter(
         ),
     )
     .unwrap();
-
-    let mut out = g.get("out").unwrap();
 
     // out.set_pixel_format(match pix_fmt {
     //     EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
