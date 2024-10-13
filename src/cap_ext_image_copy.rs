@@ -20,7 +20,7 @@ use wayland_protocols::ext::{
     },
 };
 
-use crate::{CaptureSource, DmabufFormat, DmabufPotentialFormat, DrmModifier, State};
+use crate::{CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State};
 
 impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for State<CapExtImageCopy> {
     fn event(
@@ -95,7 +95,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                     if let ExtImageCopyState::Probing(formats, _, _) =
                         &mut state.enc.unwrap_cap().state
                     {
-                        formats.push(DmabufPotentialFormat { fourcc, modifiers })
+                        formats.push(DmabufFormat { fourcc, modifiers })
                     }
                 } else {
                     warn!("Unknown DRM Fourcc: 0x{:08x}", format)
@@ -113,7 +113,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
 
                 if let Some((formats, size, dev)) = probed {
                     let size = size.expect("Done received before BufferSize...");
-                    let fmt = state.negotiate_format(&formats, size, dev.as_deref());
+                    let fmt = state.negotiate_format(&*formats, size, dev.as_deref());
                     if let Some(fmt) = fmt {
                         state.enc.unwrap_cap().state = ExtImageCopyState::Ready(fmt, size);
                     } else {
@@ -122,10 +122,10 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                 }
 
                 let cap = state.enc.unwrap_cap();
-                let (width, height, format, frame) = cap
+                let c = cap
                     .queue_capture_frame(qhandle)
                     .expect("Done without size/format!");
-                state.on_copy_src_ready(width, height, format, qhandle, &frame);
+                state.on_copy_src_ready(c, qhandle);
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {
                 state.on_copy_fail(qhandle); // untested if this actually works
@@ -165,7 +165,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
 
 enum ExtImageCopyState {
     Probing(
-        Vec<DmabufPotentialFormat>,
+        Vec<DmabufFormat>,
         Option<(u32, u32)>,
         Option<PathBuf>,
     ),
@@ -219,10 +219,15 @@ impl CaptureSource for CapExtImageCopy {
     fn queue_capture_frame(
         &self,
         eq: &QueueHandle<crate::State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
-        if let ExtImageCopyState::Ready(fmt, (w, h)) = &self.state {
+    ) -> Option<ReadyCopySource<Self::Frame>> {
+        if let ExtImageCopyState::Ready(format, (w, h)) = &self.state {
             let frame = self.output_capture_session.create_frame(eq, ());
-            Some((*w, *h, fmt.fourcc, frame))
+            Some(ReadyCopySource {
+                w: *w,
+                h: *h,
+                format: format.fourcc,
+                frame,
+            })
         } else {
             None
         }
