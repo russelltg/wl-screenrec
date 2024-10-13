@@ -1269,7 +1269,7 @@ impl EncState {
             DrmFourcc::Xrgb2101010,
         ] {
             let is_fmt_supported = capture_formats.iter().any(|p| {
-                p.fourcc == DrmFourcc::Xrgb8888
+                p.fourcc == preferred_format
                     && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
             });
 
