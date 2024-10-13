@@ -25,7 +25,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{bail, format_err, Context};
+use anyhow::{anyhow, bail, format_err, Context};
 use audio::AudioHandle;
 use cap_ext_image_copy::CapExtImageCopy;
 use cap_wlr_screencopy::CapWlrScreencopy;
@@ -44,6 +44,7 @@ use ffmpeg::{
     frame::{self, video},
     media, Packet, Rational,
 };
+use ffmpeg_sys_next::{avfilter_graph_alloc_filter, avfilter_init_str};
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use log::{debug, error, info, trace, warn};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
@@ -228,6 +229,20 @@ pub struct Args {
         default_value = "false"
     )]
     ext_image_copy_capture: bool,
+
+    #[clap(
+        long = "experimental-vulkan",
+        help = "use vulkan allocator & encode",
+        default_value = "false"
+    )]
+    vulkan: bool,
+}
+
+struct ReadyCopySource<F> {
+    w: u32,
+    h: u32,
+    format: DrmFourcc,
+    frame: F,
 }
 
 trait CaptureSource: Sized {
@@ -241,7 +256,7 @@ trait CaptureSource: Sized {
     fn queue_capture_frame(
         &self,
         eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)>;
+    ) -> Option<ReadyCopySource<Self::Frame>>;
     fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
     fn on_done_with_frame(&self, f: Self::Frame);
 }
@@ -454,6 +469,7 @@ impl<T> fmt::Debug for TypedObjectId<T> {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(transparent)]
 struct DrmModifier(u64);
 
 impl DrmModifier {
@@ -496,15 +512,10 @@ impl fmt::Debug for DrmModifier {
     }
 }
 
-#[derive(Debug, Clone)]
-struct DmabufPotentialFormat {
-    fourcc: DrmFourcc,
-    modifiers: Vec<DrmModifier>,
-}
-
+#[derive(Clone, Debug)]
 struct DmabufFormat {
     fourcc: DrmFourcc,
-    _modifier: DrmModifier,
+    modifiers: Vec<DrmModifier>,
 }
 
 #[link(name = "drm")]
@@ -791,14 +802,13 @@ impl<S: CaptureSource + 'static> State<S> {
         ))
     }
 
-    fn on_copy_src_ready(
-        &mut self,
-        dmabuf_width: u32,
-        dmabuf_height: u32,
-        format: DrmFourcc,
-        qhandle: &QueueHandle<State<S>>,
-        frame: &S::Frame,
-    ) {
+    fn on_copy_src_ready(&mut self, c: ReadyCopySource<S::Frame>, qhandle: &QueueHandle<State<S>>) {
+        let ReadyCopySource {
+            frame,
+            w: dmabuf_width,
+            h: dmabuf_height,
+            format,
+        } = c;
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                 "Oops, somehow created a screencopy frame without initial enc state stuff?"
@@ -841,7 +851,7 @@ impl<S: CaptureSource + 'static> State<S> {
             (),
         );
 
-        cap.queue_copy_frame(self.args.damage, &buf, frame);
+        cap.queue_copy_frame(self.args.damage, &buf, &frame);
 
         self.surfaces_owned_by_compositor.push_back((
             surf,
@@ -1005,8 +1015,8 @@ impl<S: CaptureSource + 'static> State<S> {
             cap,
         };
 
-        if let Some((w, h, fmt, frame)) = queue_ret {
-            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+        if let Some(c) = queue_ret {
+            self.on_copy_src_ready(c, qhandle);
         }
     }
 
@@ -1050,14 +1060,14 @@ impl<S: CaptureSource + 'static> State<S> {
 
         enc.push(surf);
 
-        if let Some((w, h, fmt, frame)) = cap.queue_capture_frame(qhandle) {
-            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+        if let Some(c) = cap.queue_capture_frame(qhandle) {
+            self.on_copy_src_ready(c, qhandle);
         }
     }
 
     fn negotiate_format(
         &mut self,
-        capture_formats: &[DmabufPotentialFormat],
+        capture_formats: &[DmabufFormat],
         (w, h): (u32, u32),
         dri_device: Option<&Path>,
     ) -> Option<DmabufFormat> {
@@ -1115,17 +1125,27 @@ struct EncState {
 #[derive(Copy, Clone, Debug)]
 enum EncodePixelFormat {
     Vaapi(Pixel),
+    Vulkan(Pixel),
     Sw(Pixel),
 }
 
-fn vaapi_codec_id(codec: codec::Id) -> Option<&'static str> {
-    match codec {
-        codec::Id::H264 => Some("h264_vaapi"),
-        codec::Id::H265 | codec::Id::HEVC => Some("hevc_vaapi"),
-        codec::Id::VP8 => Some("vp8_vaapi"),
-        codec::Id::VP9 => Some("vp9_vaapi"),
-        codec::Id::AV1 => Some("av1_vaapi"),
-        _ => None,
+fn hw_codec_id(codec: codec::Id, vulkan: bool) -> Option<&'static str> {
+    if vulkan {
+        match codec {
+            codec::Id::H264 => Some("h264_vulkan"),
+            codec::Id::H265 | codec::Id::HEVC => Some("hevc_vulkan"),
+            codec::Id::AV1 => Some("av1_vulkan"),
+            _ => None,
+        }
+    } else {
+        match codec {
+            codec::Id::H264 => Some("h264_vaapi"),
+            codec::Id::H265 | codec::Id::HEVC => Some("hevc_vaapi"),
+            codec::Id::VP8 => Some("vp8_vaapi"),
+            codec::Id::VP9 => Some("vp9_vaapi"),
+            codec::Id::AV1 => Some("av1_vaapi"),
+            _ => None,
+        }
     }
 }
 
@@ -1160,6 +1180,7 @@ fn make_video_params(
 
     enc.set_format(match enc_pix_fmt {
         EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+        EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
         EncodePixelFormat::Sw(sw) => sw,
     });
 
@@ -1198,7 +1219,7 @@ impl EncState {
     // assumed that capture_{w,h}
     fn new(
         args: &Args,
-        capture_formats: &[DmabufPotentialFormat],
+        capture_formats: &[DmabufFormat],
         refresh: Rational,
         transform: Transform,
         (capture_w, capture_h): (i32, i32), // pixels
@@ -1235,7 +1256,7 @@ impl EncState {
             };
 
             let maybe_hw_codec = if args.hw {
-                if let Some(hw_codec_name) = vaapi_codec_id(codec_id) {
+                if let Some(hw_codec_name) = hw_codec_id(codec_id, args.vulkan) {
                     if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
                         Some(codec)
                     } else {
@@ -1268,16 +1289,11 @@ impl EncState {
             DrmFourcc::Xbgr8888,
             DrmFourcc::Xrgb2101010,
         ] {
-            let is_fmt_supported = capture_formats.iter().any(|p| {
+            if let Some(fmt) = capture_formats.iter().find(|p| {
                 p.fourcc == preferred_format
                     && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
-            });
-
-            if is_fmt_supported {
-                selected_format = Some(DmabufFormat {
-                    fourcc: preferred_format,
-                    _modifier: DrmModifier::LINEAR,
-                });
+            }) {
+                selected_format = Some(fmt.clone());
                 break;
             }
         }
@@ -1303,6 +1319,8 @@ impl EncState {
             }
         } else if supported_formats.contains(&Pixel::VAAPI) {
             EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
+        } else if supported_formats.contains(&Pixel::VULKAN) {
+            EncodePixelFormat::Vulkan(args.encode_pixfmt.unwrap_or(Pixel::NV12))
         } else {
             match args.encode_pixfmt {
                 None => EncodePixelFormat::Sw(supported_formats[0]),
@@ -1330,18 +1348,23 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        eprintln!(
-            "Opening libva device from DRM device {}",
-            dri_device.display()
-        );
+        let mut hw_device_ctx = if args.vulkan {
+            #[cfg(not(ffmpeg_7_1))]
+            bail!("You need ffmpeg 7.1+ to use vulkan encode");
 
-        let mut hw_device_ctx = match AvHwDevCtx::new_libva(dri_device) {
-            Ok(hdc) => hdc,
-            Err(e) => bail!("Failed to load vaapi device: {e}\nThis is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d /dev/dri/card0` works."),
+            info!("Opening vulkan device 0");
+            AvHwDevCtx::new_vulkan("0").map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
+        } else {
+            info!(
+                "Opening libva device from DRM device {}",
+                dri_device.display()
+            );
+            AvHwDevCtx::new_libva(dri_device).map_err(
+            |e| anyhow!("Failed to load vaapi device: {e}\nThis is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d /dev/dri/card0` works."))?
         };
 
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
+            .create_frame_ctx(capture_pixfmt, capture_w, capture_h, &selected_format.modifiers)
             .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {capture_w}x{capture_h}"))?;
 
         let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
@@ -1356,21 +1379,23 @@ impl EncState {
             roi_screen_coord,
             (enc_w_screen_coord, enc_h_screen_coord),
             transform,
+            args.vulkan, // xx enum
         );
 
         let enc_pixfmt_av = match enc_pixfmt {
             EncodePixelFormat::Vaapi(fmt) => fmt,
+            EncodePixelFormat::Vulkan(fmt) => fmt,
             EncodePixelFormat::Sw(fmt) => fmt,
         };
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord)
+            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord, &selected_format.modifiers)
             .with_context(|| {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {capture_w}x{capture_h}")
             })?;
 
         info!("{}", video_filter.dump());
 
-        let enc = make_video_params(
+        let mut enc = make_video_params(
             args,
             enc_pixfmt,
             &encoder,
@@ -1400,6 +1425,10 @@ impl EncState {
             } else {
                 passed_enc_options.clone()
             };
+
+            unsafe {
+                (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.as_mut_ptr());
+            }
 
             match args.low_power {
                 LowPowerMode::Auto => match enc.open_with(low_power_opts) {
@@ -1663,45 +1692,95 @@ fn video_filter(
     roi_screen_coord: Rect,                               // size (pixels)
     (enc_w_screen_coord, enc_h_screen_coord): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled.
     transform: Transform,
+    vulkan: bool,
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
-    g.add(
-        &filter::find("buffer").unwrap(),
-        "in",
-        // format is bogus, will be replaced below, as we need to pass
-        // hw_frames_ctx which isn't possible with args=
-        &format!(
-            "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
-            AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
-        ),
-    )
-    .unwrap();
 
+    let pixfmt_int = if vulkan {
+        AVPixelFormat::AV_PIX_FMT_VULKAN as c_int
+    } else {
+        AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
+    };
+    // g.add(
+    //     &filter::find("buffer").unwrap(),
+    //     "in",
+    //     // format is bogus, will be replaced below, as we need to pass
+    //     // hw_frames_ctx which isn't possible with args=
+    //     &format!(
+    //         "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
+    //         pixfmt_int
+    //     ),
+    // )
+    // .unwrap();
+
+    // src
     unsafe {
+        let buffersrc_ctx = avfilter_graph_alloc_filter(
+            g.as_mut_ptr(),
+            filter::find("buffer").unwrap().as_mut_ptr(),
+            "in\0".as_ptr() as _,
+        );
+        if buffersrc_ctx.is_null() {
+            panic!("asdf");
+        }
+
         let p = &mut *av_buffersrc_parameters_alloc();
 
         p.width = capture_width;
         p.height = capture_height;
-        p.format = AVPixelFormat::AV_PIX_FMT_VAAPI as c_int;
+        p.format = pixfmt_int;
         p.time_base.num = 1;
         p.time_base.den = 1_000_000_000;
         p.hw_frames_ctx = inctx.as_mut_ptr();
 
-        let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
+        let sts = av_buffersrc_parameters_set(buffersrc_ctx, p as *mut _);
         assert_eq!(sts, 0);
-
         av_free(p as *mut _ as *mut _);
+
+        let sts = avfilter_init_str(buffersrc_ctx, "\0".as_ptr() as _);
+        assert_eq!(sts, 0);
     }
 
-    g.add(&filter::find("buffersink").unwrap(), "out", "")
-        .unwrap();
+    // sink
+    // unsafe {
+    //     let buffersink_ctx = avfilter_graph_alloc_filter(g.as_mut_ptr(), filter::find("buffersink").unwrap().as_mut_ptr(), "out\0".as_ptr() as _);
+    //     if buffersink_ctx.is_null() { panic!("asdf"); }
+
+    //     let p = &mut *av_buffersrc_parameters_alloc();
+
+    //      //p.format = pixfmt_int;
+    //     p.time_base.num = 1;
+    //     p.time_base.den = 1_000_000_000;
+    //     p.hw_frames_ctx = inctx.as_mut_ptr();
+
+    //     let sts = av_buffersrc_parameters_set(buffersink_ctx, p as *mut _);
+    //     assert_eq!(sts, 0);
+    //     av_free(p as *mut _ as *mut _);
+
+    //     let sts = avfilter_init_str(buffersink_ctx, "\0".as_ptr() as _);
+    //     assert_eq!(sts, 0);
+    // }
+
+    g.add(
+        &filter::find("buffersink").unwrap(),
+        "out",
+        &format!(
+            "" // "pix_fmt={}",
+               // match pix_fmt {
+               //     EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+               //     EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
+               //     EncodePixelFormat::Sw(sw) => sw,
+               // } as c_int,
+        ),
+    )
+    .unwrap();
 
     let mut out = g.get("out").unwrap();
 
-    out.set_pixel_format(match pix_fmt {
-        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-        EncodePixelFormat::Sw(sw) => sw,
-    });
+    // out.set_pixel_format(match pix_fmt {
+    //     EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+    //     EncodePixelFormat::Sw(sw) => sw,
+    // });
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
@@ -1709,6 +1788,7 @@ fn video_filter(
                 match pix_fmt {
                     EncodePixelFormat::Vaapi(fmt) => fmt,
                     EncodePixelFormat::Sw(fmt) => fmt,
+                    EncodePixelFormat::Vulkan(fmt) => fmt,
                 }
                 .into(),
             ))
@@ -1716,15 +1796,29 @@ fn video_filter(
         )
     };
 
-    let transpose_filter = match transform {
-        Transform::_90 => ",transpose_vaapi=dir=clock",
-        Transform::_180 => ",transpose_vaapi=dir=reversal",
-        Transform::_270 => ",transpose_vaapi=dir=cclock",
-        Transform::Flipped => ",transpose_vaapi=dir=hflip",
-        Transform::Flipped90 => ",transpose_vaapi=dir=cclock_flip",
-        Transform::Flipped180 => ",transpose_vaapi=dir=vflip",
-        Transform::Flipped270 => ",transpose_vaapi=dir=clock_flip",
-        _ => "",
+    // todo: vulkan
+    let transpose_filter = if vulkan {
+        match transform {
+            Transform::_90 => todo!(),
+            Transform::_180 => todo!(),
+            Transform::_270 => todo!(),
+            Transform::Flipped => todo!(),
+            Transform::Flipped90 => todo!(),
+            Transform::Flipped180 => todo!(),
+            Transform::Flipped270 => todo!(),
+            _ => "",
+        }
+    } else {
+        match transform {
+            Transform::_90 => ",transpose_vaapi=dir=clock",
+            Transform::_180 => ",transpose_vaapi=dir=reversal",
+            Transform::_270 => ",transpose_vaapi=dir=cclock",
+            Transform::Flipped => ",transpose_vaapi=dir=hflip",
+            Transform::Flipped90 => ",transpose_vaapi=dir=cclock_flip",
+            Transform::Flipped180 => ",transpose_vaapi=dir=vflip",
+            Transform::Flipped270 => ",transpose_vaapi=dir=clock_flip",
+            _ => "",
+        }
     };
 
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
@@ -1744,10 +1838,25 @@ fn video_filter(
     let (enc_w, enc_h) =
         transpose_if_transform_transposed((enc_w_screen_coord, enc_h_screen_coord), transform);
 
-    // exact=1 should not be necessary, as the input is not chroma-subsampled
-    // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
-    // it is harmless to add though, so keep it as a workaround
-    g.output("in", 0)
+    if vulkan {
+        g.output("in", 0)
+            .unwrap()
+            .input("out", 0)
+            .unwrap()
+            .parse(&format!(
+                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1{}",
+                if let EncodePixelFormat::Vulkan(_) = pix_fmt {
+                    ""
+                } else {
+                    ", hwdownload"
+                },
+            ))
+            .unwrap();
+    } else {
+        // exact=1 should not be necessary, as the input is not chroma-subsampled
+        // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
+        // it is harmless to add though, so keep it as a workaround
+        g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
@@ -1760,6 +1869,7 @@ fn video_filter(
             },
         ))
         .unwrap();
+    }
 
     g.validate().unwrap();
 
