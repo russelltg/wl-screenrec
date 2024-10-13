@@ -1525,7 +1525,7 @@ impl EncState {
         }
         let selected_format = match selected_format {
             Some(sf) => sf,
-            None => 
+            None =>
                 bail!("failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}", capture_formats),
         };
         let capture_pixfmt = dmabuf_to_av(selected_format.fourcc);
@@ -1695,17 +1695,20 @@ impl EncState {
             None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
 
-        Ok((EncState {
-            video_filter,
-            enc_video,
-            filter_output_timebase: filter_timebase,
-            octx,
-            vid_stream_idx,
-            frames_rgb,
-            history_state,
-            sigusr1_flag,
-            audio,
-        }, selected_format))
+        Ok((
+            EncState {
+                video_filter,
+                enc_video,
+                filter_output_timebase: filter_timebase,
+                octx,
+                vid_stream_idx,
+                frames_rgb,
+                history_state,
+                sigusr1_flag,
+                audio,
+            },
+            selected_format,
+        ))
     }
 
     fn process_ready(&mut self) {

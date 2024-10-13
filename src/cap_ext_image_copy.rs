@@ -75,7 +75,10 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
             ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
                 let dev = dev_t::from_ne_bytes(device.try_into().unwrap());
                 let node = DrmNode::from_dev_id(dev).unwrap();
-                let node = node.node_with_type(drm::node::NodeType::Render).unwrap().unwrap();
+                let node = node
+                    .node_with_type(drm::node::NodeType::Render)
+                    .unwrap()
+                    .unwrap();
                 let path = node.dev_path().unwrap();
                 if let ExtImageCopyState::Probing(_, _, dev) = &mut state.enc.unwrap_cap().state {
                     *dev = Some(path);
