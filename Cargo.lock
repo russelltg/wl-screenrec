@@ -281,8 +281,6 @@ dependencies = [
 [[package]]
 name = "ffmpeg-next"
 version = "7.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da02698288e0275e442a47fc12ca26d50daf0d48b15398ba5906f20ac2e2a9f9"
 dependencies = [
  "bitflags",
  "ffmpeg-sys-next",
@@ -295,6 +293,7 @@ version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9e9c75ebd4463de9d8998fb134ba26347fe5faee62fabf0a4b4d41bd500b4ad"
 dependencies = [
+ "ash",
  "bindgen",
  "cc",
  "libc",
@@ -943,6 +942,7 @@ name = "wl-screenrec"
 version = "0.1.7"
 dependencies = [
  "anyhow",
+ "ash",
  "clap",
  "clap_complete",
  "drm",
