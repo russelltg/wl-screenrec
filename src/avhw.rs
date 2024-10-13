@@ -97,7 +97,7 @@ impl AvHwDevCtx {
             hwframe_casted.initial_pool_size = 5;
 
             if self.fmt == Pixel::VULKAN {
-                let vk_ptr = (hwframe_casted.hwctx as *mut AVVulkanFramesContext);
+                let vk_ptr = hwframe_casted.hwctx as *mut AVVulkanFramesContext;
 
                 (*vk_ptr).tiling = VkImageTiling::VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 

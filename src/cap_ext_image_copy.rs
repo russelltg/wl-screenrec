@@ -113,7 +113,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
 
                 if let Some((formats, size, dev)) = probed {
                     let size = size.expect("Done received before BufferSize...");
-                    let fmt = state.negotiate_format(&*formats, size, dev.as_deref());
+                    let fmt = state.negotiate_format(&formats, size, dev.as_deref());
                     if let Some(fmt) = fmt {
                         state.enc.unwrap_cap().state = ExtImageCopyState::Ready(fmt, size);
                     } else {
@@ -164,11 +164,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
 }
 
 enum ExtImageCopyState {
-    Probing(
-        Vec<DmabufFormat>,
-        Option<(u32, u32)>,
-        Option<PathBuf>,
-    ),
+    Probing(Vec<DmabufFormat>, Option<(u32, u32)>, Option<PathBuf>),
     Ready(DmabufFormat, (u32, u32)),
 }
 
