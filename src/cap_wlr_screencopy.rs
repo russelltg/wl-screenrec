@@ -1,6 +1,7 @@
 use std::sync::atomic::Ordering::SeqCst;
 
 use anyhow::Context;
+use drm::buffer::DrmFourcc;
 use log::debug;
 use wayland_client::{
     globals::GlobalList,
@@ -12,7 +13,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{CaptureSource, State};
+use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(
@@ -50,7 +51,20 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                 width: dmabuf_width,
                 height: dmabuf_height,
             } => {
-                state.on_copy_src_ready(dmabuf_width, dmabuf_height, format, qhandle, capture);
+                let fourcc = DrmFourcc::try_from(format).unwrap();
+                let cap = state.enc.unwrap_cap();
+                if !cap.sent_format {
+                    cap.sent_format = true;
+                    state.negotiate_format(
+                        &[DmabufPotentialFormat {
+                            fourcc,
+                            modifiers: vec![DrmModifier::LINEAR],
+                        }],
+                        (dmabuf_width, dmabuf_height),
+                        None,
+                    );
+                }
+                state.on_copy_src_ready(dmabuf_width, dmabuf_height, fourcc, qhandle, capture);
             }
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
@@ -67,6 +81,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
 pub struct CapWlrScreencopy {
     screencopy_manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
+    sent_format: bool,
 }
 impl CaptureSource for CapWlrScreencopy {
     fn new(
@@ -80,6 +95,7 @@ impl CaptureSource for CapWlrScreencopy {
         Ok(Self {
             screencopy_manager: man,
             output,
+            sent_format: false,
         })
     }
 
@@ -94,7 +110,7 @@ impl CaptureSource for CapWlrScreencopy {
     fn queue_capture_frame(
         &self,
         eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, u32, Self::Frame)> {
+    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
         // creating this triggers the linux_dmabuf event, which is where we allocate etc
 
         let _capture = self

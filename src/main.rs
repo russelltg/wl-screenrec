@@ -10,6 +10,7 @@ use std::{
     mem::{self, swap},
     num::ParseIntError,
     os::fd::{AsRawFd, BorrowedFd},
+    path::{Path, PathBuf},
     process::exit,
     ptr::null_mut,
     str::from_utf8_unchecked,
@@ -29,6 +30,7 @@ use audio::AudioHandle;
 use cap_ext_image_copy::CapExtImageCopy;
 use cap_wlr_screencopy::CapWlrScreencopy;
 use clap::{command, ArgAction, CommandFactory, Parser};
+use drm::buffer::DrmFourcc;
 use ffmpeg::{
     codec, dict, dictionary, encoder,
     ffi::{
@@ -250,7 +252,7 @@ trait CaptureSource: Sized {
     fn queue_capture_frame(
         &self,
         eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, u32, Self::Frame)>;
+    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)>;
     fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
     fn on_done_with_frame(&self, f: Self::Frame);
 }
@@ -467,9 +469,65 @@ impl<T> fmt::Debug for TypedObjectId<T> {
     }
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+struct DrmModifier(u64);
+
+impl DrmModifier {
+    const LINEAR: DrmModifier = DrmModifier(0);
+}
+
+impl fmt::Debug for DrmModifier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        unsafe {
+            let vendor_p = drmGetFormatModifierVendor(self.0);
+            let name_p = drmGetFormatModifierName(self.0);
+
+            let vendor = if vendor_p.is_null() {
+                None
+            } else {
+                CStr::from_ptr(vendor_p).to_str().ok()
+            };
+            let name = if name_p.is_null() {
+                None
+            } else {
+                CStr::from_ptr(name_p).to_str().ok()
+            };
+
+            match (vendor, name) {
+                (None, None) => write!(f, "0x{:08x}", self.0)?,
+                (None, Some(name)) => write!(f, "0x{:08x} = UNKNOWN_{}", self.0, name)?,
+                (Some(vendor), None) => write!(f, "0x{:08x} = {}_UNKNOWN", self.0, vendor)?,
+                (Some(vendor), Some(name)) => write!(f, "0x{:08x} = {}_{}", self.0, vendor, name)?,
+            }
+
+            if !vendor_p.is_null() {
+                libc::free(vendor_p as _);
+            }
+            if !name_p.is_null() {
+                libc::free(name_p as _);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DmabufPotentialFormat {
+    fourcc: DrmFourcc,
+    modifiers: Vec<DrmModifier>,
+}
+
+struct DmabufFormat {
+    fourcc: DrmFourcc,
+    _modifier: DrmModifier,
+}
+
 #[link(name = "drm")]
 extern "C" {
     pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
+    pub fn drmGetFormatModifierVendor(modifier: u64) -> *mut libc::c_char;
+    pub fn drmGetFormatModifierName(modifier: u64) -> *mut libc::c_char;
 }
 
 impl<S> Dispatch<WpDrmLeaseDeviceV1, ()> for State<S>
@@ -492,11 +550,11 @@ where
                     warn!(
                         "drmGetRenderDeviceNameFromFd returned null, guessing /dev/dri/renderD128. pass --dri-device if this is not correct or to suppress this warning"
                     );
-                    "/dev/dri/renderD128".to_owned()
+                    PathBuf::from("/dev/dri/renderD128".to_owned())
                 } else {
                     let ret = CStr::from_ptr(ptr).to_string_lossy().to_string();
                     libc::free(ptr as *mut _);
-                    ret
+                    PathBuf::from(ret)
                 });
             };
         }
@@ -535,7 +593,7 @@ struct State<S: CaptureSource> {
     args: Args,
     quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
-    dri_device: Option<String>,
+    dri_device: Option<PathBuf>,
     gm: GlobalList,
 }
 
@@ -788,10 +846,10 @@ impl<S: CaptureSource> Dispatch<WlRegistry, ()> for State<S> {
     }
 }
 
-fn dmabuf_to_av(dmabuf: drm_fourcc::DrmFourcc) -> Pixel {
+fn dmabuf_to_av(dmabuf: DrmFourcc) -> Pixel {
     match dmabuf {
-        drm_fourcc::DrmFourcc::Xrgb8888 => Pixel::BGRZ,
-        drm_fourcc::DrmFourcc::Xrgb2101010 => Pixel::X2RGB10LE,
+        DrmFourcc::Xrgb8888 => Pixel::BGRZ,
+        DrmFourcc::Xrgb2101010 => Pixel::X2RGB10LE,
         f => unimplemented!("fourcc {f:?}"),
     }
 }
@@ -828,7 +886,7 @@ impl<S: CaptureSource + 'static> State<S> {
             .context("your compositor does not support zwlr-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
         let dri_device = if let Some(dev) = &args.dri_device {
-            Some(dev.clone())
+            Some(PathBuf::from(dev.clone()))
         } else if gm
             .bind::<WpDrmLeaseDeviceV1, _, _>(
                 &eq,
@@ -838,7 +896,7 @@ impl<S: CaptureSource + 'static> State<S> {
             .is_err()
         {
             warn!("Your compositor does not support wp_drm_lease_device_v1, so guessing that dri device is /dev/dri/renderD128. pass --dri-device if this is incorrect or to suppress this warning");
-            Some("/dev/dri/renderD128".to_owned())
+            Some(PathBuf::from("/dev/dri/renderD128".to_owned()))
         } else {
             None // will be filled by the callback
         };
@@ -894,7 +952,7 @@ impl<S: CaptureSource + 'static> State<S> {
         &mut self,
         dmabuf_width: u32,
         dmabuf_height: u32,
-        format: u32,
+        format: DrmFourcc,
         qhandle: &QueueHandle<State<S>>,
         frame: &S::Frame,
     ) {
@@ -902,31 +960,8 @@ impl<S: CaptureSource + 'static> State<S> {
             EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                 "Oops, somehow created a screencopy frame without initial enc state stuff?"
             ),
-            EncConstructionStage::EverythingButFormat { output, roi, cap } => {
-                let capture_pixfmt =
-                    dmabuf_to_av(drm_fourcc::DrmFourcc::try_from(format).expect("Unknown fourcc"));
-                self.enc = EncConstructionStage::Complete(
-                    match EncState::new(
-                        &self.args,
-                        capture_pixfmt,
-                        output.refresh,
-                        output.transform,
-                        (dmabuf_width as i32, dmabuf_height as i32),
-                        roi,
-                        Arc::clone(&self.sigusr1_flag),
-                        self.dri_device
-                            .as_ref()
-                            .expect("somehow got screenrec before getting DRI device?"),
-                    ) {
-                        Ok(enc) => enc,
-                        Err(e) => {
-                            eprintln!("failed to create encoder(s): {}", e);
-                            self.quit_flag.store(1, SeqCst);
-                            return;
-                        }
-                    },
-                    cap,
-                );
+            EncConstructionStage::EverythingButFormat { .. } => {
+                panic!("you need to call negotiate_format before on_copy_src_ready")
             }
             EncConstructionStage::Complete(a, b) => {
                 self.enc = EncConstructionStage::Complete(a, b) // put it back
@@ -957,7 +992,7 @@ impl<S: CaptureSource + 'static> State<S> {
         let buf = dma_params.create_immed(
             dmabuf_width as i32,
             dmabuf_height as i32,
-            format,
+            format as u32,
             zwp_linux_buffer_params_v1::Flags::empty(),
             qhandle,
             (),
@@ -1262,6 +1297,43 @@ impl<S: CaptureSource + 'static> State<S> {
             self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
         }
     }
+
+    fn negotiate_format(
+        &mut self,
+        capture_formats: &[DmabufPotentialFormat],
+        (w, h): (u32, u32),
+        dri_device: Option<&Path>,
+    ) -> Option<DmabufFormat> {
+        debug!("Supported capture formats are {capture_formats:?}");
+        match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
+            EncConstructionStage::EverythingButFormat { output, roi, cap } => {
+                let (enc, fmt) = match EncState::new(
+                    &self.args,
+                    capture_formats,
+                    output.refresh,
+                    output.transform,
+                    (w as i32, h as i32),
+                    roi,
+                    Arc::clone(&self.sigusr1_flag),
+                    dri_device
+                        .or_else(|| self.dri_device.as_deref())
+                        .expect("somehow got screenrec before getting DRI device?"),
+                ) {
+                    Ok(enc) => enc,
+                    Err(e) => {
+                        eprintln!("failed to create encoder(s): {}", e);
+                        self.quit_flag.store(1, SeqCst);
+                        return None;
+                    }
+                };
+
+                self.enc = EncConstructionStage::Complete(enc, cap);
+
+                Some(fmt)
+            }
+            _ => panic!("called negotiate_format in a strange state"),
+        }
+    }
 }
 
 struct EncState {
@@ -1362,14 +1434,14 @@ impl EncState {
     // assumed that capture_{w,h}
     fn new(
         args: &Args,
-        capture_pixfmt: Pixel,
+        capture_formats: &[DmabufPotentialFormat],
         refresh: Rational,
         transform: Transform,
         (capture_w, capture_h): (i32, i32), // pixels
         roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
         sigusr1_flag: Arc<AtomicBool>,
-        dri_device: &str,
-    ) -> anyhow::Result<Self> {
+        dri_device: &Path,
+    ) -> anyhow::Result<(Self, DmabufFormat)> {
         let muxer_options = if let Some(muxer_options) = &args.ffmpeg_muxer_options {
             parse_dict(muxer_options).unwrap()
         } else {
@@ -1425,6 +1497,40 @@ impl EncState {
             }
         };
 
+        // format selection: naive version, should actually see what the ffmpeg filter supports...
+        let mut selected_format = None;
+        for preferred_format in [
+            DrmFourcc::Xrgb8888,
+            DrmFourcc::Xbgr8888,
+            DrmFourcc::Xrgb2101010,
+        ] {
+            let is_fmt_supported = capture_formats
+                .iter()
+                .find(|p| {
+                    p.fourcc == DrmFourcc::Xrgb8888
+                        && p.modifiers
+                            .iter()
+                            .find(|m| **m == DrmModifier::LINEAR)
+                            .is_some()
+                })
+                .is_some();
+
+            if is_fmt_supported {
+                selected_format = Some(DmabufFormat {
+                    fourcc: preferred_format,
+                    _modifier: DrmModifier::LINEAR,
+                });
+                break;
+            }
+        }
+        let selected_format = match selected_format {
+            Some(sf) => sf,
+            None => 
+                bail!("failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}", capture_formats),
+        };
+        let capture_pixfmt = dmabuf_to_av(selected_format.fourcc);
+        info!("capture pixel format is {}", selected_format.fourcc);
+
         let supported_formats = supported_formats(&encoder);
         let enc_pixfmt = if supported_formats.is_empty() {
             match args.encode_pixfmt {
@@ -1466,12 +1572,16 @@ impl EncState {
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
-        eprintln!("Opening libva device from DRM device {dri_device}");
+        eprintln!(
+            "Opening libva device from DRM device {}",
+            dri_device.display()
+        );
 
         let mut hw_device_ctx = match AvHwDevCtx::new_libva(dri_device) {
             Ok(hdc) => hdc,
             Err(e) => bail!("Failed to load vaapi device: {e}\nThis is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d /dev/dri/card0` works."),
         };
+
         let mut frames_rgb = hw_device_ctx
             .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
             .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {capture_w}x{capture_h}"))?;
@@ -1585,7 +1695,7 @@ impl EncState {
             None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
 
-        Ok(EncState {
+        Ok((EncState {
             video_filter,
             enc_video,
             filter_output_timebase: filter_timebase,
@@ -1595,7 +1705,7 @@ impl EncState {
             history_state,
             sigusr1_flag,
             audio,
-        })
+        }, selected_format))
     }
 
     fn process_ready(&mut self) {
