@@ -96,11 +96,6 @@ mod platform {
     pub const DEFAULT_AUDIO_BACKEND: &str = "oss";
 }
 use platform::*;
-use wayland_protocols_wlr::output_management::v1::client::{
-    zwlr_output_head_v1::{self, ZwlrOutputHeadV1},
-    zwlr_output_manager_v1::{self, ZwlrOutputManagerV1},
-    zwlr_output_mode_v1::ZwlrOutputModeV1,
-};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -395,7 +390,7 @@ struct PartialOutputInfo {
     transform: Option<Transform>,
 }
 impl PartialOutputInfo {
-    fn complete(&self, fractional_scale: f64) -> Option<OutputInfo> {
+    fn complete(&self) -> Option<OutputInfo> {
         if let (Some(name), Some(loc), Some(logical_size), Some(size_pixels), Some(refresh)) = (
             &self.name,
             &self.loc,
@@ -408,7 +403,6 @@ impl PartialOutputInfo {
                 name: name.clone(),
                 logical_size: *logical_size,
                 refresh: *refresh,
-                fractional_scale,
                 size_pixels: *size_pixels,
                 output: self.output.clone(),
                 transform: self.transform.unwrap_or(Transform::Normal),
@@ -426,26 +420,22 @@ struct OutputInfo {
     logical_size: (i32, i32),
     size_pixels: (i32, i32),
     refresh: Rational,
-    fractional_scale: f64,
     output: WlOutput,
     transform: Transform,
 }
 
 impl OutputInfo {
     fn logical_to_pixel(&self, logical: i32) -> i32 {
-        (f64::from(logical) * self.fractional_scale).round() as i32
+        (f64::from(logical) * self.fractional_scale()).round() as i32
+    }
+
+    fn fractional_scale(&self) -> f64 {
+        f64::from(self.size_pixels.0) / f64::from(self.logical_size.0)
     }
 
     fn size_screen_space(&self) -> (i32, i32) {
         transpose_if_transform_transposed(self.size_pixels, self.transform)
     }
-}
-
-#[derive(Default)]
-struct PartialOutputInfoWlr {
-    name: Option<String>,
-    scale: Option<f64>,
-    enabled: Option<bool>,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone)]
@@ -545,7 +535,6 @@ struct State<S: CaptureSource> {
 
 struct OutputProbeState {
     partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
-    partial_outputs_wlr: HashMap<TypedObjectId<ZwlrOutputHeadV1>, PartialOutputInfoWlr>,
     outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>, // none for disabled
 }
 
@@ -639,7 +628,7 @@ impl<S: CaptureSource + 'static> Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>>
         event: <ZxdgOutputV1 as Proxy>::Event,
         out_id: &TypedObjectId<WlOutput>,
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         debug!("zxdg-output event: {:?} {event:?}", proxy.id());
         match event {
@@ -654,76 +643,11 @@ impl<S: CaptureSource + 'static> Dispatch<ZxdgOutputV1, TypedObjectId<WlOutput>>
                     info.logical_size = Some((width, height))
                 });
             }
-            _ => {}
-        }
-    }
-}
-
-impl<S> Dispatch<ZwlrOutputManagerV1, ()> for State<S>
-where
-    S: CaptureSource + 'static,
-{
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrOutputManagerV1,
-        event: <ZwlrOutputManagerV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwlr-output-manager event: {:?} {event:?}", proxy.id());
-        if let zwlr_output_manager_v1::Event::Done { .. } = event {
-            state.zwlr_ouptut_info_done(qhandle);
-        }
-    }
-
-    event_created_child!(State<S>, ZwlrOutputManagerV1, [
-        zwlr_output_manager_v1::EVT_HEAD_OPCODE => (ZwlrOutputHeadV1, ()),
-    ]);
-}
-
-impl<S> Dispatch<ZwlrOutputHeadV1, ()> for State<S>
-where
-    S: CaptureSource + 'static,
-{
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrOutputHeadV1,
-        event: <ZwlrOutputHeadV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        debug!("zwlr-output-head event: {:?} {event:?}", proxy.id());
-        let id = TypedObjectId::new(proxy);
-        match event {
-            zwlr_output_head_v1::Event::Name { name } => {
-                state.update_output_info_zwlr_head(id, |data| data.name = Some(name));
-            }
-            zwlr_output_head_v1::Event::Scale { scale } => {
-                state.update_output_info_zwlr_head(id, |data| data.scale = Some(scale));
-            }
-            zwlr_output_head_v1::Event::Enabled { enabled } => {
-                state.update_output_info_zwlr_head(id, |data| data.enabled = Some(enabled != 0));
+            zxdg_output_v1::Event::Done => {
+                state.done_output_info_wl_output(out_id.clone(), qhandle);
             }
             _ => {}
         }
-    }
-
-    event_created_child!(State<S>, ZwlrOutputHeadV1, [
-        zwlr_output_head_v1::EVT_MODE_OPCODE => (ZwlrOutputModeV1, ()),
-    ]);
-}
-
-impl<S: CaptureSource> Dispatch<ZwlrOutputModeV1, ()> for State<S> {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrOutputModeV1,
-        _event: <ZwlrOutputModeV1 as Proxy>::Event,
-        _data: &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
     }
 }
 
@@ -822,14 +746,6 @@ impl<S: CaptureSource + 'static> State<S> {
             .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
             .context("your compositor does not support zxdg-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
-        // bind to get events so we can get the fractional scale
-        let _wlr_output_man: ZwlrOutputManagerV1 = gm
-            .bind(
-                &eq,
-                1..=ZwlrOutputManagerV1::interface().version,
-                (),
-            )
-            .context("your compositor does not support zwlr-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
         let mut partial_outputs = HashMap::new();
         for g in gm.contents().clone_list() {
@@ -862,7 +778,6 @@ impl<S: CaptureSource + 'static> State<S> {
                 dma,
                 enc: EncConstructionStage::ProbingOutputs(OutputProbeState {
                     partial_outputs,
-                    partial_outputs_wlr: HashMap::new(),
                     outputs: HashMap::new(),
                 }),
                 starting_timestamp: None,
@@ -972,103 +887,20 @@ impl<S: CaptureSource + 'static> State<S> {
             return;
         }
 
-        let name = match &output.name {
-            Some(name) => name,
-            None => {
-                warn!(
-                    "compositor did not provide name for wl_output {}, strange",
-                    id.0.protocol_id()
-                );
-                "<unknown>"
-            }
-        };
+        if output.name.is_none() {
+            warn!(
+                "compositor did not provide name for wl_output {}, strange",
+                id.0.protocol_id()
+            );
+        }
 
-        // see if the associated zwlr_head has been probed yet
-        if let Some((
-            _head_name,
-            PartialOutputInfoWlr {
-                scale: Some(scale),
-                enabled: Some(enabled),
-                ..
-            },
-        )) = p
-            .partial_outputs_wlr
-            .iter()
-            .find(|elem| elem.1.name.as_deref() == Some(name))
-        {
-            if let Some(info) = output.complete(*scale) {
-                if *enabled {
-                    p.outputs.insert(id, Some(info));
-                } else {
-                    p.outputs.insert(id, None);
-                }
-            }
+        if let Some(info) = output.complete() {
+            p.outputs.insert(id, Some(info));
         }
 
         self.start_if_output_probe_complete(qhandle);
     }
 
-    fn update_output_info_zwlr_head(
-        &mut self,
-        id: TypedObjectId<ZwlrOutputHeadV1>,
-        f: impl FnOnce(&mut PartialOutputInfoWlr),
-    ) {
-        if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
-            let output = p.partial_outputs_wlr.entry(id).or_default();
-            f(output);
-        }
-    }
-
-    fn zwlr_ouptut_info_done(&mut self, qhandle: &QueueHandle<Self>) {
-        let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
-            p
-        } else {
-            return;
-        };
-
-        for wlr_info in p.partial_outputs_wlr.values() {
-            let enabled = match wlr_info.enabled {
-                None => {
-                    warn!(
-                        "compositor did not report if output {} is enabled, strange",
-                        wlr_info.name.as_deref().unwrap_or("<unknown>")
-                    );
-                    true
-                }
-                Some(enabled) => enabled,
-            };
-
-            let name = match &wlr_info.name {
-                Some(name) => name,
-                None => {
-                    warn!("compositor did not report output name, strange");
-                    "<unknown>"
-                }
-            };
-
-            if let Some((wl_output_name, partial_output)) = p
-                .partial_outputs
-                .iter()
-                .find(|po| po.1.name.as_deref() == Some(name))
-            {
-                if let Some(info) = partial_output.complete(wlr_info.scale.unwrap_or(1.)) {
-                    info!("output probe for {name} is complete");
-                    if enabled {
-                        if wlr_info.scale.is_none() {
-                            warn!("compositor did not report fractional scale for enabled output {name}");
-                        }
-                        p.outputs.insert(wl_output_name.clone(), Some(info));
-                    } else {
-                        p.outputs.insert(wl_output_name.clone(), None);
-                    }
-                } else {
-                    debug!("output probe still incomplete for {name}: {partial_output:?}");
-                }
-            }
-        }
-
-        self.start_if_output_probe_complete(qhandle);
-    }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<Self>) {
         let p = if let EncConstructionStage::ProbingOutputs(p) = &self.enc {
@@ -1079,17 +911,15 @@ impl<S: CaptureSource + 'static> State<S> {
 
         if p.outputs.len() != p.partial_outputs.len() {
             // probe not complete
-            if self.args.verbose >= 2 {
-                println!(
-                    "output probe not yet complete, still waiting for {}",
-                    p.partial_outputs
-                        .iter()
-                        .filter(|(id, _)| !p.outputs.contains_key(id))
-                        .map(|(id, po)| format!("({id:?}, {:?})", po))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
+            debug!(
+                "output probe not yet complete, still waiting for {}",
+                p.partial_outputs
+                    .iter()
+                    .filter(|(id, _)| !p.outputs.contains_key(id))
+                    .map(|(id, po)| format!("({id:?}, {:?})", po))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             return;
         }
 
