@@ -25,6 +25,42 @@
         {
             "type": "lldb",
             "request": "launch",
+            "name": "Debug executable 'wl-screenrec' (WAYLAND-2)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=wl-screenrec",
+                    "--package=wl-screenrec",
+                    "--features=experimental-vulkan"
+                ],
+                "filter": {
+                    "name": "wl-screenrec",
+                    "kind": "bin"
+                },
+                "env": {
+                    "FFMPEG_DIR": "/home/russell/ffmpeg/inst"
+                }
+            },
+            "env": {
+                "WAYLAND_DISPLAY": "wayland-2",
+                "RUST_BACKTRACE": "full",
+                "LD_LIBRARY_PATH": "/home/russell/ffmpeg/inst/lib",
+                "VK_ICD_FILENAMES": "/home/russell/mesa/build/src/intel/vulkan/intel_devenv_icd.x86_64.json"
+            },
+            "preRunCommands": [
+                "process handle -p true -s false INT"
+            ],
+            "args": [
+                "--experimental-ext-image-copy-capture", 
+                "--experimental-vulkan",
+                "--codec=avc", 
+                "-vvv",
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
             "name": "Debug unit tests in executable 'wl-screenrec'",
             "cargo": {
                 "args": [
