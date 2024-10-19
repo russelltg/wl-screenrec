@@ -916,7 +916,8 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
-        let surf = enc.frames_rgb.alloc().unwrap();
+        let mut surf = enc.frames_rgb.alloc().unwrap();
+        surf.set_color_space(ffmpeg::color::Space::RGB);
 
         let (desc, mapping) = map_drm(&surf);
 
@@ -1538,6 +1539,7 @@ impl EncState {
             #[allow(unreachable_code)]
             {
                 info!("Opening vulkan device 0");
+                error!("TODO: get correct vulkan device");
                 AvHwDevCtx::new_vulkan("0")
                     .map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
             }
@@ -1640,8 +1642,10 @@ impl EncState {
             }
         } else {
             let mut enc_options = passed_enc_options.clone();
-            if enc_options.get("preset").is_none() {
-                enc_options.set("preset", "ultrafast");
+            if encoder.name() == "x264" {
+                if enc_options.get("preset").is_none() {
+                    enc_options.set("preset", "ultrafast");
+                }
             }
             enc.open_with(enc_options).unwrap()
         };
@@ -1926,44 +1930,22 @@ fn video_filter(
         assert_eq!(sts, 0);
     }
 
+
     // sink
-    // unsafe {
-    //     let buffersink_ctx = avfilter_graph_alloc_filter(g.as_mut_ptr(), filter::find("buffersink").unwrap().as_mut_ptr(), "out\0".as_ptr() as _);
-    //     if buffersink_ctx.is_null() { panic!("asdf"); }
-
-    //     let p = &mut *av_buffersrc_parameters_alloc();
-
-    //      //p.format = pixfmt_int;
-    //     p.time_base.num = 1;
-    //     p.time_base.den = 1_000_000_000;
-    //     p.hw_frames_ctx = inctx.as_mut_ptr();
-
-    //     let sts = av_buffersrc_parameters_set(buffersink_ctx, p as *mut _);
-    //     assert_eq!(sts, 0);
-    //     av_free(p as *mut _ as *mut _);
-
-    //     let sts = avfilter_init_str(buffersink_ctx, "\0".as_ptr() as _);
-    //     assert_eq!(sts, 0);
-    // }
-
     g.add(
         &filter::find("buffersink").unwrap(),
         "out",
-        &format!(
-            "" // "pix_fmt={}",
-               // match pix_fmt {
-               //     EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-               //     EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
-               //     EncodePixelFormat::Sw(sw) => sw,
-               // } as c_int,
-        ),
+        &(format!(
+            "pixel_formats={}",
+            AVPixelFormat::from(match pix_fmt {
+                EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+                EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
+                EncodePixelFormat::Sw(sw) => sw,
+            }) as u32
+        )),
     )
     .unwrap();
 
-    // out.set_pixel_format(match pix_fmt {
-    //     EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-    //     EncodePixelFormat::Sw(sw) => sw,
-    // });
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
@@ -2027,7 +2009,7 @@ fn video_filter(
             .input("out", 0)
             .unwrap()
             .parse(&format!(
-                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1{}",
+                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vulkan=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{}",
                 if let EncodePixelFormat::Vulkan(_) = pix_fmt {
                     ""
                 } else {
