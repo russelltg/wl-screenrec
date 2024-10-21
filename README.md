@@ -1,6 +1,6 @@
 # wl-screenrec
 
-High performance screen recorder for wlroots Wayland. 
+High performance screen recorder for wlroots Wayland.
 
 Uses dma-buf transfers to get surface, and uses the GPU to do both the pixel format conversion and the encoding,
 meaning the raw video data never touches the CPU, leaving it free to run your applications.
@@ -11,8 +11,8 @@ Open an issue if something is not working, I'm happy to take a look.
 
 * wayland compositor supporting the following protocols:
   * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1)
-  * [`linux-dmabuf-v1](https://wayland.app/protocols/linux-dmabuf-v1)
-  * [`xdg-output-unstable-v1](https://wayland.app/protocols/xdg-output-unstable-v1)
+  * [`linux-dmabuf-v1`](https://wayland.app/protocols/linux-dmabuf-v1)
+  * [`xdg-output-unstable-v1`](https://wayland.app/protocols/xdg-output-unstable-v1)
 
    [Sway](https://swaywm.org/), [Hyprland](https://hyprland.org/), and [wayfire](https://wayfire.org/) all meet this criteria.
 * [`vaapi`](https://01.org/temp-linuxgraphics/community/vaapi) encode support, consult your distribution for how to set this up. Known good configurations:
@@ -96,7 +96,7 @@ wl-screenrec -g "0,0 128x128" # manual region
 
 Capture 444 video (no pixel format compression):
 
-> NOTE: Look at `vainfo -a` to see your supported pixel formats. Support is very 
+> NOTE: Look at `vainfo -a` to see your supported pixel formats. Support is very
 > hardware-dependent. For example, on my machine only HEVC suports 444 formats, and
 > all of 8-bit RGB formats didn't work for whatever reason.
 
