@@ -52,7 +52,6 @@ use thiserror::Error;
 use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
-    event_created_child,
     globals::{registry_queue_init, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
@@ -1313,19 +1312,27 @@ impl EncState {
         info!("encode pixel format is {enc_pixfmt:?}");
 
         let codec_id = encoder.id();
-        if unsafe {
+        match unsafe {
             avformat_query_codec(
                 octx.format().as_ptr(),
                 codec_id.into(),
                 FF_COMPLIANCE_STRICT,
             )
-        } != 1
-        {
-            bail!(
+        } {
+            0 => bail!(
                 "Format {} does not support {:?} codec",
                 octx.format().name(),
                 codec_id
-            );
+            ),
+            1 => (),
+            e => {
+                warn!(
+                    "Format {} might not support {:?} codec ({})",
+                    octx.format().name(),
+                    codec_id,
+                    ffmpeg::Error::from(e)
+                )
+            }
         }
 
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
