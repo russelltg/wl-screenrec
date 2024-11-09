@@ -52,7 +52,7 @@ use thiserror::Error;
 use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
-    globals::{registry_queue_init, GlobalList, GlobalListContents},
+    globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::{self, Mode, Transform, WlOutput},
@@ -385,6 +385,7 @@ fn map_drm(frame: &frame::Video) -> (AVDRMFrameDescriptor, video::Video) {
 
 #[derive(Debug)]
 struct PartialOutputInfo {
+    global_name: u32,
     name: Option<String>,
     loc: Option<(i32, i32)>,
     logical_size: Option<(i32, i32)>,
@@ -404,6 +405,7 @@ impl PartialOutputInfo {
             &self.refresh,
         ) {
             Some(OutputInfo {
+                global_name: self.global_name,
                 loc: *loc,
                 name: name.clone(),
                 logical_size: *logical_size,
@@ -420,6 +422,7 @@ impl PartialOutputInfo {
 
 #[derive(Clone, Debug)]
 struct OutputInfo {
+    global_name: u32,
     name: String,
     loc: (i32, i32),
     logical_size: (i32, i32),
@@ -507,6 +510,7 @@ struct DmabufPotentialFormat {
     modifiers: Vec<DrmModifier>,
 }
 
+#[derive(Copy, Clone)]
 struct DmabufFormat {
     fourcc: DrmFourcc,
     _modifier: DrmModifier,
@@ -527,7 +531,6 @@ struct State<S: CaptureSource> {
         WlBuffer,
     )>,
     dma: ZwpLinuxDmabufV1,
-    wl_output: Option<WlOutput>,
     enc: EncConstructionStage<S>,
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
@@ -535,30 +538,52 @@ struct State<S: CaptureSource> {
     quit_flag: Arc<AtomicUsize>,
     sigusr1_flag: Arc<AtomicBool>,
     gm: GlobalList,
+    xdg_output_manager: ZxdgOutputManagerV1,
 }
 
-struct OutputProbeState {
+struct ProbingOutputsState {
     partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
 }
 
+struct CompleteState<S> {
+    enc: EncState,
+    cap: S,
+    output: OutputInfo,
+    output_went_away: bool,
+}
+
+struct OutputWentAwayState {
+    enc: EncState,
+    waiting_for_output_name: String,
+    partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
+}
+
 enum EncConstructionStage<S> {
-    ProbingOutputs(OutputProbeState),
+    ProbingOutputs(ProbingOutputsState),
     EverythingButFormat {
-        output: OutputInfo,
         roi: Rect,
         cap: S,
+        output: OutputInfo,
     },
-    Complete(EncState, S),
+    Complete(CompleteState<S>),
+    OutputWentAway(OutputWentAwayState),
     Intermediate,
 }
 impl<S> EncConstructionStage<S> {
     #[track_caller]
-    fn unwrap(&mut self) -> (&mut EncState, &mut S) {
-        if let EncConstructionStage::Complete(enc, s) = self {
-            (enc, s)
+    fn unwrap(&mut self) -> &mut CompleteState<S> {
+        if let EncConstructionStage::Complete(e) = self {
+            e
         } else {
             panic!("unwrap on non-complete EncConstructionStage")
+        }
+    }
+    fn take_enc(self) -> EncState {
+        match self {
+            EncConstructionStage::Complete(e) => e.enc,
+            EncConstructionStage::OutputWentAway(e) => e.enc,
+            _ => panic!("unwrap on non-complete EncConstructionStage"),
         }
     }
 
@@ -566,7 +591,7 @@ impl<S> EncConstructionStage<S> {
     fn unwrap_cap(&mut self) -> &mut S {
         match self {
             EncConstructionStage::EverythingButFormat { cap, .. } => cap,
-            EncConstructionStage::Complete(_, cap) => cap,
+            EncConstructionStage::Complete(e) => &mut e.cap,
             _ => panic!("no capture source yet"),
         }
     }
@@ -575,6 +600,35 @@ impl<S> EncConstructionStage<S> {
 enum HistoryState {
     RecordingHistory(Duration, VecDeque<Packet>), // --history specified, but SIGUSR1 not received yet. State is (duration of history, history)
     Recording(i64), // --history not specified OR (--history specified and SIGUSR1 has been sent). Data is the PTS offset (in nanoseconds), which is required when using history. If a stream is not present, then assume 0 offset
+}
+
+impl OutputWentAwayState {
+    fn new_wl_output<S: CaptureSource + 'static>(
+        &mut self,
+        registry: &WlRegistry,
+        xdg_output_manager: &ZxdgOutputManagerV1,
+        global: Global,
+        qhandle: &QueueHandle<State<S>>,
+    ) {
+        assert!(global.interface == WlOutput::interface().name);
+        let output: WlOutput = registry.bind(global.name, global.version, qhandle, ());
+        let _xdg = xdg_output_manager.get_xdg_output(&output, qhandle, TypedObjectId::new(&output));
+
+        self.partial_outputs.insert(
+            TypedObjectId::new(&output),
+            PartialOutputInfo {
+                global_name: global.name,
+                name: None,
+                loc: None,
+                logical_size: None,
+                size_pixels: None,
+                refresh: None,
+                output,
+                has_recvd_done: false,
+                transform: None,
+            },
+        );
+    }
 }
 
 impl<S: CaptureSource> Dispatch<WlBuffer, ()> for State<S> {
@@ -589,15 +643,47 @@ impl<S: CaptureSource> Dispatch<WlBuffer, ()> for State<S> {
     }
 }
 
-impl<S: CaptureSource> Dispatch<WlRegistry, GlobalListContents> for State<S> {
+impl<S: CaptureSource + 'static> Dispatch<WlRegistry, GlobalListContents> for State<S> {
     fn event(
-        _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: <WlRegistry as Proxy>::Event,
+        state: &mut Self,
+        proxy: &WlRegistry,
+        event: <WlRegistry as Proxy>::Event,
         _data: &GlobalListContents,
         _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
+        use wayland_client::protocol::wl_registry::Event;
+        debug!("wl-registry event: {:?}", event);
+        match event {
+            Event::GlobalRemove { name } => {
+                if let EncConstructionStage::Complete(c) = &mut state.enc {
+                    if c.output.global_name == name {
+                        c.output_went_away = true;
+                    }
+                }
+            }
+            Event::Global {
+                name,
+                interface,
+                version,
+            } => {
+                if interface == WlOutput::interface().name {
+                    if let EncConstructionStage::OutputWentAway(owa) = &mut state.enc {
+                        owa.new_wl_output(
+                            proxy,
+                            &state.xdg_output_manager,
+                            Global {
+                                name,
+                                interface,
+                                version,
+                            },
+                            qhandle,
+                        );
+                    }
+                }
+            }
+            _ => todo!(),
+        }
     }
 }
 
@@ -746,7 +832,7 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let registry = display.get_registry(&eq, ());
 
-        let xdg_output_man: ZxdgOutputManagerV1 = gm
+        let xdg_output_manager: ZxdgOutputManagerV1 = gm
             .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
             .context("your compositor does not support zxdg-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
 
@@ -757,11 +843,13 @@ impl<S: CaptureSource + 'static> State<S> {
                     registry.bind(g.name, WlOutput::interface().version, &eq, ());
 
                 // query so we get the dispatch callbacks
-                let _xdg = xdg_output_man.get_xdg_output(&output, &eq, TypedObjectId::new(&output));
+                let _xdg =
+                    xdg_output_manager.get_xdg_output(&output, &eq, TypedObjectId::new(&output));
 
                 partial_outputs.insert(
                     TypedObjectId::new(&output),
                     PartialOutputInfo {
+                        global_name: g.name,
                         name: None,
                         loc: None,
                         logical_size: None,
@@ -779,17 +867,17 @@ impl<S: CaptureSource + 'static> State<S> {
             State {
                 surfaces_owned_by_compositor: VecDeque::new(),
                 dma,
-                enc: EncConstructionStage::ProbingOutputs(OutputProbeState {
+                enc: EncConstructionStage::ProbingOutputs(ProbingOutputsState {
                     partial_outputs,
                     outputs: HashMap::new(),
                 }),
                 starting_timestamp: None,
                 fps_counter: FpsCounter::new(),
                 args,
-                wl_output: None,
                 quit_flag,
                 sigusr1_flag,
                 gm,
+                xdg_output_manager,
             },
             queue,
         ))
@@ -803,20 +891,21 @@ impl<S: CaptureSource + 'static> State<S> {
         qhandle: &QueueHandle<State<S>>,
         frame: &S::Frame,
     ) {
-        match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
+        match &mut self.enc {
             EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                 "Oops, somehow created a screencopy frame without initial enc state stuff?"
             ),
             EncConstructionStage::EverythingButFormat { .. } => {
                 panic!("you need to call negotiate_format before on_copy_src_ready")
             }
-            EncConstructionStage::Complete(a, b) => {
-                self.enc = EncConstructionStage::Complete(a, b) // put it back
+            EncConstructionStage::OutputWentAway(_) => {
+                panic!("copy_src_ready called when the output went away??")
             }
             EncConstructionStage::Intermediate => panic!("enc left in intermediate state"),
+            EncConstructionStage::Complete(_) => {}
         }
 
-        let (enc, cap) = self.enc.unwrap();
+        let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
         let surf = enc.frames_rgb.alloc().unwrap();
 
@@ -861,9 +950,17 @@ impl<S: CaptureSource + 'static> State<S> {
         id: &TypedObjectId<WlOutput>,
         f: impl FnOnce(&mut PartialOutputInfo),
     ) {
-        if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
-            let output = p.partial_outputs.get_mut(id).unwrap();
-            f(output);
+        match &mut self.enc {
+            EncConstructionStage::ProbingOutputs(ProbingOutputsState {
+                partial_outputs, ..
+            })
+            | EncConstructionStage::OutputWentAway(OutputWentAwayState {
+                partial_outputs, ..
+            }) => {
+                let output = partial_outputs.get_mut(id).unwrap();
+                f(output);
+            }
+            _ => (),
         }
     }
 
@@ -872,14 +969,16 @@ impl<S: CaptureSource + 'static> State<S> {
         id: TypedObjectId<WlOutput>,
         qhandle: &QueueHandle<Self>,
     ) {
-        let p = if let EncConstructionStage::ProbingOutputs(p) = &mut self.enc {
-            p
-        } else {
-            // got this event because of some dispaly changes, ignore...
-            return;
+        let p = match &mut self.enc {
+            EncConstructionStage::ProbingOutputs(p) => &mut p.partial_outputs,
+            EncConstructionStage::OutputWentAway(p) => &mut p.partial_outputs,
+            _ => {
+                // got this event because of some dispaly changes, ignore...
+                return;
+            }
         };
 
-        let output = p.partial_outputs.get_mut(&id).unwrap();
+        let output = p.get_mut(&id).unwrap();
 
         // for each output, we will get 2 done events
         // * when we create the WlOutput the first time
@@ -896,12 +995,42 @@ impl<S: CaptureSource + 'static> State<S> {
                 id.0.protocol_id()
             );
         }
+        let complete_output = output.complete();
 
-        if let Some(info) = output.complete() {
-            p.outputs.insert(id, Some(info));
+        match &mut self.enc {
+            EncConstructionStage::ProbingOutputs(probing_outputs_state) => {
+                if let Some(info) = complete_output {
+                    probing_outputs_state.outputs.insert(id, Some(info));
+                }
+
+                self.start_if_output_probe_complete(qhandle);
+            }
+            EncConstructionStage::OutputWentAway(output_went_away_state) => {
+                if let Some(info) = complete_output {
+                    if info.name == output_went_away_state.waiting_for_output_name {
+                        info!(
+                            "output {} came back, continuing screenrecording..",
+                            info.name
+                        );
+                        let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate)
+                            .take_enc();
+                        let cap = S::new(&self.gm, qhandle, info.output.clone()).unwrap();
+                        let queue_ret = cap.queue_capture_frame(qhandle);
+                        self.enc = EncConstructionStage::Complete(CompleteState {
+                            enc,
+                            cap,
+                            output: info,
+                            output_went_away: false,
+                        });
+
+                        if let Some((w, h, fmt, frame)) = queue_ret {
+                            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+                        }
+                    }
+                }
+            }
+            _ => unreachable!(),
         }
-
-        self.start_if_output_probe_complete(qhandle);
     }
 
     fn start_if_output_probe_complete(&mut self, qhandle: &QueueHandle<Self>) {
@@ -991,8 +1120,6 @@ impl<S: CaptureSource + 'static> State<S> {
 
         info!("Using output {}", output.name);
 
-        self.wl_output = Some(output.output.clone());
-
         let cap = match S::new(&self.gm, qhandle, output.output.clone()) {
             Ok(cap) => cap,
             Err(err) => {
@@ -1004,9 +1131,9 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let queue_ret = cap.queue_capture_frame(qhandle);
         self.enc = EncConstructionStage::EverythingButFormat {
-            output: output.clone(),
             roi,
             cap,
+            output: output.clone(),
         };
 
         if let Some((w, h, fmt, frame)) = queue_ret {
@@ -1021,7 +1148,7 @@ impl<S: CaptureSource + 'static> State<S> {
         tv_sec_lo: u32,
         tv_nsec: u32,
     ) {
-        let (enc, cap) = self.enc.unwrap();
+        let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
         self.fps_counter.on_frame();
 
@@ -1059,6 +1186,38 @@ impl<S: CaptureSource + 'static> State<S> {
         }
     }
 
+    fn on_copy_fail(&mut self, qhandle: &QueueHandle<Self>) {
+        let CompleteState {
+            output_went_away,
+            output,
+            ..
+        } = self.enc.unwrap();
+
+        if *output_went_away {
+            info!(
+                "copy failed because output {} went away. Waiting for it to come back...",
+                output.name
+            );
+            let waiting_for_output_name = output.name.clone();
+            let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate).take_enc();
+
+            let mut owa = OutputWentAwayState {
+                enc,
+                waiting_for_output_name,
+                partial_outputs: Default::default(),
+            };
+            for g in self.gm.contents().clone_list() {
+                if g.interface == WlOutput::interface().name {
+                    owa.new_wl_output(self.gm.registry(), &self.xdg_output_manager, g, qhandle);
+                }
+            }
+            self.enc = EncConstructionStage::OutputWentAway(owa);
+        } else {
+            error!("unknown copy fail reason, quitting");
+            self.quit_flag.store(1, SeqCst)
+        }
+    }
+
     fn negotiate_format(
         &mut self,
         capture_formats: &[DmabufPotentialFormat],
@@ -1077,7 +1236,7 @@ impl<S: CaptureSource + 'static> State<S> {
 
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::EverythingButFormat { output, roi, cap } => {
-                let (enc, fmt) = match EncState::new(
+                let enc = match EncState::new(
                     &self.args,
                     capture_formats,
                     output.refresh,
@@ -1095,9 +1254,21 @@ impl<S: CaptureSource + 'static> State<S> {
                     }
                 };
 
-                self.enc = EncConstructionStage::Complete(enc, cap);
+                let selected_format = enc.selected_format;
+                self.enc = EncConstructionStage::Complete(CompleteState {
+                    enc,
+                    cap,
+                    output,
+                    output_went_away: false,
+                });
 
-                Some(fmt)
+                Some(selected_format)
+            }
+            EncConstructionStage::Complete(c) => {
+                // can happen on dispaly disconnect & reconnect
+                let selected_format = c.enc.selected_format;
+                self.enc = EncConstructionStage::Complete(c);
+                Some(selected_format)
             }
             _ => panic!("called negotiate_format in a strange state"),
         }
@@ -1114,6 +1285,7 @@ struct EncState {
     history_state: HistoryState,
     sigusr1_flag: Arc<AtomicBool>,
     audio: Option<AudioHandle>,
+    selected_format: DmabufFormat,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1209,7 +1381,7 @@ impl EncState {
         roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &Path,
-    ) -> anyhow::Result<(Self, DmabufFormat)> {
+    ) -> anyhow::Result<Self> {
         let muxer_options = if let Some(muxer_options) = &args.ffmpeg_muxer_options {
             parse_dict(muxer_options).unwrap()
         } else {
@@ -1465,20 +1637,18 @@ impl EncState {
             None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
 
-        Ok((
-            EncState {
-                video_filter,
-                enc_video,
-                filter_output_timebase: filter_timebase,
-                octx,
-                vid_stream_idx,
-                frames_rgb,
-                history_state,
-                sigusr1_flag,
-                audio,
-            },
+        Ok(EncState {
+            video_filter,
+            enc_video,
+            filter_output_timebase: filter_timebase,
+            octx,
+            vid_stream_idx,
+            frames_rgb,
+            history_state,
+            sigusr1_flag,
+            audio,
             selected_format,
-        ))
+        })
     }
 
     fn process_ready(&mut self) {
@@ -1884,8 +2054,8 @@ fn execute<S: CaptureSource + 'static>(args: Args) {
         queue.blocking_dispatch(&mut state).unwrap();
     }
 
-    if let EncConstructionStage::Complete(enc, _) = &mut state.enc {
-        enc.flush();
+    if let EncConstructionStage::Complete(c) = &mut state.enc {
+        c.enc.flush();
     }
 
     exit(quit_flag.load(Ordering::SeqCst) as i32)
