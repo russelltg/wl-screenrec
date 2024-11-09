@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::atomic::Ordering::SeqCst};
+use std::path::PathBuf;
 
 use anyhow::Context;
 use drm::{buffer::DrmFourcc, node::DrmNode};
@@ -75,8 +75,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
-                eprintln!("Failed to screencopy!");
-                state.quit_flag.store(1, SeqCst)
+                state.on_copy_fail(qhandle);
             }
             _ => {}
         }

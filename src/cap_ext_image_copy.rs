@@ -127,7 +127,9 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                     .expect("Done without size/format!");
                 state.on_copy_src_ready(width, height, format, qhandle, &frame);
             }
-            ext_image_copy_capture_session_v1::Event::Stopped => {}
+            ext_image_copy_capture_session_v1::Event::Stopped => {
+                state.on_copy_fail(qhandle); // untested if this actually works
+            }
             _ => todo!(),
         }
     }
@@ -150,9 +152,9 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
                 tv_sec_hi,
                 tv_sec_lo,
                 tv_nsec,
-            } => state.enc.unwrap().1.time = Some((tv_sec_hi, tv_sec_lo, tv_nsec)),
+            } => state.enc.unwrap().cap.time = Some((tv_sec_hi, tv_sec_lo, tv_nsec)),
             Ready => {
-                let (hi, lo, n) = state.enc.unwrap().1.time.take().unwrap();
+                let (hi, lo, n) = state.enc.unwrap().cap.time.take().unwrap();
                 state.on_copy_complete(qhandle, hi, lo, n);
             }
             Failed { .. } => todo!(),
