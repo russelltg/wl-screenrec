@@ -508,7 +508,6 @@ struct DmabufFormat {
 
 #[link(name = "drm")]
 extern "C" {
-    pub fn drmGetRenderDeviceNameFromFd(fd: libc::c_int) -> *mut libc::c_char;
     pub fn drmGetFormatModifierVendor(modifier: u64) -> *mut libc::c_char;
     pub fn drmGetFormatModifierName(modifier: u64) -> *mut libc::c_char;
 }
