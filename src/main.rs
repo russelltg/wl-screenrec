@@ -1807,7 +1807,7 @@ fn execute<S: CaptureSource + 'static>(args: Args) {
     let sigusr1_flag = Arc::new(AtomicBool::new(false));
 
     signal_hook::flag::register_usize(SIGINT, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 1).unwrap();
+    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 0).unwrap();
     signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
     signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
 
