@@ -10,7 +10,7 @@ use ffmpeg::{
     format::Pixel,
     frame,
 };
-use ffmpeg_sys_next::AVVulkanFramesContext;
+use ffmpeg_sys_next::{av_hwdevice_ctx_create_derived, AVVulkanFramesContext};
 
 use crate::DrmModifier;
 
@@ -48,18 +48,32 @@ impl AvHwDevCtx {
         }
     }
 
-    pub fn new_vulkan(dri_device: &str) -> Result<Self, ffmpeg::Error> {
+    pub fn new_vulkan(dri_device: &Path) -> Result<Self, ffmpeg::Error> {
         unsafe {
+            let mut hw_device_ctx_drm = null_mut();
             let mut hw_device_ctx = null_mut();
 
-            let dev_cstr = CString::new(dri_device).unwrap();
+            let dev_cstr = CString::new(dri_device.to_str().unwrap()).unwrap();
+
             let sts = av_hwdevice_ctx_create(
-                &mut hw_device_ctx,
-                ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN,
+                &mut hw_device_ctx_drm,
+                ffmpeg_sys_next::AVHWDeviceType::AV_HWDEVICE_TYPE_DRM,
                 dev_cstr.as_ptr(),
                 null_mut(),
                 0,
             );
+            if sts != 0 {
+                return Err(ffmpeg::Error::from(sts));
+            }
+
+            let sts = av_hwdevice_ctx_create_derived(
+                &mut hw_device_ctx,
+                ffmpeg_next::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN,
+                hw_device_ctx_drm,
+                0,
+            );
+
+            av_buffer_unref(&mut hw_device_ctx_drm);
 
             if sts != 0 {
                 Err(ffmpeg::Error::from(sts))

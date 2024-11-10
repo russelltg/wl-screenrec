@@ -17,9 +17,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{
-    CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State
-};
+use crate::{CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(

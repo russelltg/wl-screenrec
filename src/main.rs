@@ -1538,9 +1538,8 @@ impl EncState {
 
             #[allow(unreachable_code)]
             {
-                info!("Opening vulkan device 0");
-                error!("TODO: get correct vulkan device");
-                AvHwDevCtx::new_vulkan("0")
+                info!("Opening vulkan device from {}", dri_device.display());
+                AvHwDevCtx::new_vulkan(dri_device)
                     .map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
             }
         } else {
@@ -1930,7 +1929,6 @@ fn video_filter(
         assert_eq!(sts, 0);
     }
 
-
     // sink
     g.add(
         &filter::find("buffersink").unwrap(),
@@ -1945,7 +1943,6 @@ fn video_filter(
         )),
     )
     .unwrap();
-
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
