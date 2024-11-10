@@ -175,7 +175,10 @@ pub struct Args {
     )]
     audio_codec: AudioCodec,
 
-    #[clap(long, help="audio bitrate to encode at. Unit is bytes per second, 16 kB is 128 kbps")]
+    #[clap(
+        long,
+        help = "audio bitrate to encode at. Unit is bytes per second, 16 kB is 128 kbps"
+    )]
     audio_bitrate: Option<Size>,
 
     #[clap(

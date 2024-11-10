@@ -391,7 +391,7 @@ fn audio_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "aresample=async=1,aformat=sample_rates={}:sample_fmts={}:channel_layouts={:#x}",
+            "aformat=sample_rates={}:sample_fmts={}:channel_layouts={:#x}",
             codec_sample_rate,
             codec_sample_format.name(),
             codec_channel_layout.bits(),
