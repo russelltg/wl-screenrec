@@ -19,6 +19,7 @@ use ffmpeg::{
     format::{self, context::Input, Sample},
     frame, ChannelLayout, Dictionary, Format, Packet, Rational,
 };
+use human_size::Byte;
 
 use crate::{fifo::AudioFifo, Args};
 
@@ -249,6 +250,9 @@ impl AudioHandle {
         let audio_encode_format = audio_codec.formats().unwrap().next().unwrap();
         enc_audio.set_format(audio_encode_format);
         enc_audio.set_time_base(dec_audio.time_base());
+        if let Some(audio_bitrate) = args.audio_bitrate {
+            enc_audio.set_bit_rate((audio_bitrate.into::<Byte>().value() * 8.) as usize);
+        }
 
         let enc_audio = enc_audio.open_as(audio_codec).unwrap();
 
@@ -387,7 +391,7 @@ fn audio_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "aformat=sample_rates={}:sample_fmts={}:channel_layouts={:#x}",
+            "aresample=async=1,aformat=sample_rates={}:sample_fmts={}:channel_layouts={:#x}",
             codec_sample_rate,
             codec_sample_format.name(),
             codec_channel_layout.bits(),

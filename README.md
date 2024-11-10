@@ -147,7 +147,7 @@ Options:
   -v, --verbose...
           add very loud logging. can be specified multiple times
       --dri-device <DRI_DEVICE>
-          which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol, if present. if not present, /dev/dri/renderD128 is guessed
+          which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol when using wlr-screencopy, and from ext-image-copy-capture-session if using ext-image-copy-capture, if present. if not present, /dev/dri/renderD128 is guessed
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
@@ -162,6 +162,8 @@ Options:
           Options to pass to the encoder. Format looks like key=val,key2=val2
       --audio-codec <AUDIO_CODEC>
           Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied [default: auto] [possible values: auto, aac, mp3, flac, opus]
+      --audio-bitrate <AUDIO_BITRATE>
+          audio bitrate to encode at. Unit is bytes per second, 16 KB is 128 kbps [default: "16 kB"]
       --ffmpeg-audio-encoder <FFMPEG_AUDIO_ENCODER>
           Use this to force a particular audio ffmpeg encoder. By default, this is guessed from the muxer (which is guess by the file extension if --ffmpeg-muxer isn't passed)
       --encode-pixfmt <ENCODE_PIXFMT>
@@ -184,6 +186,8 @@ Options:
           GOP (group of pictures) size
       --generate-completions <COMPLETIONS_GENERATOR>
           print completions for the specified shell to stdout [possible values: bash, elvish, fish, powershell, zsh]
+      --experimental-ext-image-copy-capture
+          use the new ext-image-copy-capture protocol
   -h, --help
           Print help
   -V, --version

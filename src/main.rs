@@ -175,6 +175,9 @@ pub struct Args {
     )]
     audio_codec: AudioCodec,
 
+    #[clap(long, help="audio bitrate to encode at. Unit is bytes per second, 16 kB is 128 kbps")]
+    audio_bitrate: Option<Size>,
+
     #[clap(
         long,
         value_enum,
@@ -1143,7 +1146,7 @@ fn make_video_params(
             .video()
             .unwrap();
 
-    enc.set_bit_rate(args.bitrate.into::<Byte>().value() as usize * 8);
+    enc.set_bit_rate((args.bitrate.into::<Byte>().value() * 8.) as usize);
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
     enc.set_time_base(Rational(1, 1_000_000_000));
