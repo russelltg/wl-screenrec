@@ -147,7 +147,7 @@ Options:
   -v, --verbose...
           add very loud logging. can be specified multiple times
       --dri-device <DRI_DEVICE>
-          which dri device to use for vaapi. by default, this is obtained from the drm-lease-v1 protocol when using wlr-screencopy, and from ext-image-copy-capture-session if using ext-image-copy-capture, if present. if not present, /dev/dri/renderD128 is guessed
+          which dri device to use for vaapi. by default, this is obtained from the linux-dmabuf-v1 protocol when using wlr-screencopy, and from ext-image-copy-capture-session if using ext-image-copy-capture, if present. if not present, /dev/dri/renderD128 is guessed
       --low-power <LOW_POWER>
           [default: auto] [possible values: auto, on, off]
       --codec <CODEC>
