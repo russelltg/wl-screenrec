@@ -1938,29 +1938,20 @@ fn video_filter(
         )
     };
 
-    // todo: vulkan
+    let transpose_dir = match transform {
+        Transform::_90 => "clock",
+        Transform::_180 => "reversal",
+        Transform::_270 => "cclock",
+        Transform::Flipped => "hflip",
+        Transform::Flipped90 => "cclock_flip",
+        Transform::Flipped180 => "vflip",
+        Transform::Flipped270 => "clock_flip",
+        _ => "",
+    };
     let transpose_filter = if vulkan {
-        match transform {
-            Transform::_90 => todo!(),
-            Transform::_180 => todo!(),
-            Transform::_270 => todo!(),
-            Transform::Flipped => todo!(),
-            Transform::Flipped90 => todo!(),
-            Transform::Flipped180 => todo!(),
-            Transform::Flipped270 => todo!(),
-            _ => "",
-        }
+        format!("transpose_vulkan=dir={transpose_dir}")
     } else {
-        match transform {
-            Transform::_90 => ",transpose_vaapi=dir=clock",
-            Transform::_180 => ",transpose_vaapi=dir=reversal",
-            Transform::_270 => ",transpose_vaapi=dir=cclock",
-            Transform::Flipped => ",transpose_vaapi=dir=hflip",
-            Transform::Flipped90 => ",transpose_vaapi=dir=cclock_flip",
-            Transform::Flipped180 => ",transpose_vaapi=dir=vflip",
-            Transform::Flipped270 => ",transpose_vaapi=dir=clock_flip",
-            _ => "",
-        }
+        format!("transpose_vaapi=dir={transpose_dir}")
     };
 
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
