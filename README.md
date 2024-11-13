@@ -1,6 +1,6 @@
 # wl-screenrec
 
-![crates.io](https://img.shields.io/crates/v/wl-screenrec.svg)
+[![crates.io](https://img.shields.io/crates/v/wl-screenrec.svg)](https://crates.io/crates/wl-screenrec)
 
 High performance screen recorder for wlroots Wayland.
 
