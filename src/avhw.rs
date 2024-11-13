@@ -1,12 +1,10 @@
 use std::{ffi::CString, path::Path, ptr::null_mut};
 
-use ash::vk;
 use ffmpeg::{
     dict,
     ffi::{
         av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwdevice_ctx_create_derived,
         av_hwframe_ctx_alloc, av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext,
-        AVVulkanFramesContext,
     },
     format::Pixel,
     frame,
@@ -91,7 +89,7 @@ impl AvHwDevCtx {
         pixfmt: Pixel,
         width: i32,
         height: i32,
-        modifiers: &[DrmModifier],
+        _modifiers: &[DrmModifier],
     ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
             let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
@@ -105,16 +103,24 @@ impl AvHwDevCtx {
             hwframe_casted.initial_pool_size = 5;
 
             if self.fmt == Pixel::VULKAN {
-                let vk_ptr = hwframe_casted.hwctx as *mut AVVulkanFramesContext;
+                #[cfg(feature = "experimental-vulkan")]
+                {
+                    use ash::vk;
+                    use ffmpeg::ffi::AVVulkanFramesContext;
 
-                (*vk_ptr).tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
+                    let vk_ptr = hwframe_casted.hwctx as *mut AVVulkanFramesContext;
 
-                let mut create_info = vk::ImageDrmFormatModifierListCreateInfoEXT {
-                    drm_format_modifier_count: modifiers.len() as u32,
-                    p_drm_format_modifiers: modifiers.as_ptr() as _,
-                    ..Default::default()
-                };
-                (*vk_ptr).create_pnext = &mut create_info as *mut _ as _;
+                    (*vk_ptr).tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
+
+                    let mut create_info = vk::ImageDrmFormatModifierListCreateInfoEXT {
+                        drm_format_modifier_count: _modifiers.len() as u32,
+                        p_drm_format_modifiers: _modifiers.as_ptr() as _,
+                        ..Default::default()
+                    };
+                    (*vk_ptr).create_pnext = &mut create_info as *mut _ as _;
+                }
+                #[cfg(not(feature = "experimental-vulkan"))]
+                panic!("vulkan requested but built without vulkan support")
             }
 
             let sts = av_hwframe_ctx_init(hwframe);

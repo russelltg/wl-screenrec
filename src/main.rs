@@ -234,6 +234,7 @@ pub struct Args {
     )]
     ext_image_copy_capture: bool,
 
+    #[cfg_attr(not(feature = "experimental-vulkan"), clap(hide = true))]
     #[clap(
         long = "experimental-vulkan",
         help = "use vulkan allocator & encode",

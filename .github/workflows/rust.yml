@@ -22,7 +22,7 @@ jobs:
       run: rustup install stable
     - uses: actions/checkout@v4
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --verbose --locked --all-features
     - name: Format
       run: cargo fmt --check
     #- name: Run tests
