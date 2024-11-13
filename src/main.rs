@@ -892,13 +892,16 @@ impl<S: CaptureSource + 'static> State<S> {
         ))
     }
 
-    fn on_copy_src_ready(&mut self, c: ReadyCopySource<S::Frame>, qhandle: &QueueHandle<State<S>>) {
-        let ReadyCopySource {
+    fn on_copy_src_ready(
+        &mut self,
+        ReadyCopySource {
             frame,
             w: dmabuf_width,
             h: dmabuf_height,
             format,
-        } = c;
+        }: ReadyCopySource<S::Frame>,
+        qhandle: &QueueHandle<State<S>>,
+    ) {
         match &mut self.enc {
             EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                 "Oops, somehow created a screencopy frame without initial enc state stuff?"
@@ -1888,17 +1891,6 @@ fn video_filter(
     } else {
         AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
     };
-    // g.add(
-    //     &filter::find("buffer").unwrap(),
-    //     "in",
-    //     // format is bogus, will be replaced below, as we need to pass
-    //     // hw_frames_ctx which isn't possible with args=
-    //     &format!(
-    //         "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
-    //         pixfmt_int
-    //     ),
-    // )
-    // .unwrap();
 
     // src
     unsafe {
@@ -1929,19 +1921,8 @@ fn video_filter(
     }
 
     // sink
-    g.add(
-        &filter::find("buffersink").unwrap(),
-        "out",
-        &(format!(
-            "pixel_formats={}",
-            AVPixelFormat::from(match pix_fmt {
-                EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-                EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
-                EncodePixelFormat::Sw(sw) => sw,
-            }) as u32
-        )),
-    )
-    .unwrap();
+    g.add(&filter::find("buffersink").unwrap(), "out", "")
+        .unwrap();
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
