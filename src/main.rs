@@ -1939,20 +1939,24 @@ fn video_filter(
     };
 
     let transpose_dir = match transform {
-        Transform::_90 => "clock",
-        Transform::_180 => "reversal",
-        Transform::_270 => "cclock",
-        Transform::Flipped => "hflip",
-        Transform::Flipped90 => "cclock_flip",
-        Transform::Flipped180 => "vflip",
-        Transform::Flipped270 => "clock_flip",
-        _ => "",
+        Transform::_90 => Some("clock"),
+        Transform::_180 => Some("reversal"),
+        Transform::_270 => Some("cclock"),
+        Transform::Flipped => Some("hflip"),
+        Transform::Flipped90 => Some("cclock_flip"),
+        Transform::Flipped180 => Some("vflip"),
+        Transform::Flipped270 => Some("clock_flip"),
+        _ => None,
     };
-    let transpose_filter = if vulkan {
-        format!("transpose_vulkan=dir={transpose_dir}")
-    } else {
-        format!("transpose_vaapi=dir={transpose_dir}")
-    };
+    let transpose_filter = transpose_dir
+        .map(|transpose_dir| {
+            if vulkan {
+                format!("transpose_vulkan=dir={transpose_dir}")
+            } else {
+                format!("transpose_vaapi=dir={transpose_dir}")
+            }
+        })
+        .unwrap_or_default();
 
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
     // after the format conversion
