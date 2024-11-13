@@ -36,8 +36,8 @@ use ffmpeg::{
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_dict_parse_string, av_free, av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3,
-        avfilter_graph_alloc_filter, avfilter_init_str, avformat_query_codec, AVDRMFrameDescriptor,
-        AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
+        avfilter_graph_alloc_filter, avfilter_init_dict, avformat_query_codec,
+        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
@@ -1900,7 +1900,7 @@ fn video_filter(
             "in\0".as_ptr() as _,
         );
         if buffersrc_ctx.is_null() {
-            panic!("asdf");
+            panic!("faield to alloc buffersrc filter");
         }
 
         let p = &mut *av_buffersrc_parameters_alloc();
@@ -1916,7 +1916,7 @@ fn video_filter(
         assert_eq!(sts, 0);
         av_free(p as *mut _ as *mut _);
 
-        let sts = avfilter_init_str(buffersrc_ctx, "\0".as_ptr() as _);
+        let sts = avfilter_init_dict(buffersrc_ctx, null_mut());
         assert_eq!(sts, 0);
     }
 
