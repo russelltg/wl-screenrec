@@ -49,7 +49,7 @@ paru -S wl-screenrec
 paru -S wl-screenrec-git
 ```
 Or, manually:
-```
+```bash
 git clone https://aur.archlinux.org/wl-screenrec-git.git
 cd wl-screenrec-git
 makepkg -si
