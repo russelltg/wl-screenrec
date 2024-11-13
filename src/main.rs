@@ -1536,8 +1536,7 @@ impl EncState {
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         let mut hw_device_ctx = if args.vulkan {
-            #[cfg(not(ffmpeg_7_1))]
-            bail!("You need ffmpeg 7.1+ to use vulkan encode");
+            error!("Vulkan is buggy and isn't known to work on any platform. Do not report bugs.");
 
             #[allow(unreachable_code)]
             {
