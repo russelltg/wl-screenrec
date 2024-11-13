@@ -1,5 +1,7 @@
 # wl-screenrec
 
+![crates.io](https://img.shields.io/crates/v/wl-screenrec.svg)
+
 High performance screen recorder for wlroots Wayland.
 
 Uses dma-buf transfers to get surface, and uses the GPU to do both the pixel format conversion and the encoding,
