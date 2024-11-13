@@ -36,15 +36,14 @@ use ffmpeg::{
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_dict_parse_string, av_free, av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3,
-        avformat_query_codec, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE,
-        FF_COMPLIANCE_STRICT,
+        avfilter_graph_alloc_filter, avfilter_init_str, avformat_query_codec, AVDRMFrameDescriptor,
+        AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
     frame::{self, video},
     media, Packet, Rational,
 };
-use ffmpeg_sys_next::{avfilter_graph_alloc_filter, avfilter_init_str};
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use log::{debug, error, info, trace, warn};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};

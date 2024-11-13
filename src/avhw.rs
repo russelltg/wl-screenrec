@@ -4,13 +4,13 @@ use ash::vk;
 use ffmpeg::{
     dict,
     ffi::{
-        av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwframe_ctx_alloc,
-        av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext,
+        av_buffer_ref, av_buffer_unref, av_hwdevice_ctx_create, av_hwdevice_ctx_create_derived,
+        av_hwframe_ctx_alloc, av_hwframe_ctx_init, av_hwframe_get_buffer, AVHWFramesContext,
+        AVVulkanFramesContext,
     },
     format::Pixel,
     frame,
 };
-use ffmpeg_sys_next::{av_hwdevice_ctx_create_derived, AVVulkanFramesContext};
 
 use crate::DrmModifier;
 
