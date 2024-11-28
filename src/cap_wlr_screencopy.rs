@@ -60,14 +60,19 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                 if !cap.sent_format {
                     cap.sent_format = true;
                     let device = cap.drm_device.clone();
-                    state.negotiate_format(
-                        &[DmabufPotentialFormat {
-                            fourcc,
-                            modifiers: vec![DrmModifier::LINEAR],
-                        }],
-                        (dmabuf_width, dmabuf_height),
-                        device.as_deref(),
-                    );
+                    if state
+                        .negotiate_format(
+                            &[DmabufPotentialFormat {
+                                fourcc,
+                                modifiers: vec![DrmModifier::LINEAR],
+                            }],
+                            (dmabuf_width, dmabuf_height),
+                            device.as_deref(),
+                        )
+                        .is_none()
+                    {
+                        return; // error, which has already been reported
+                    }
                 }
                 state.on_copy_src_ready(dmabuf_width, dmabuf_height, fourcc, qhandle, capture);
             }

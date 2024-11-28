@@ -1248,7 +1248,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 ) {
                     Ok(enc) => enc,
                     Err(e) => {
-                        eprintln!("failed to create encoder(s): {}", e);
+                        error!("failed to create encoder(s): {}", e);
                         self.quit_flag.store(1, SeqCst);
                         return None;
                     }
@@ -1521,7 +1521,7 @@ impl EncState {
 
         let mut hw_device_ctx = match AvHwDevCtx::new_libva(dri_device) {
             Ok(hdc) => hdc,
-            Err(e) => bail!("Failed to load vaapi device: {e}\nThis is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d /dev/dri/card0` works."),
+            Err(e) => bail!("Failed to load vaapi device: {e}. This is likely *not* a bug in wl-screenrec, but an issue with your vaapi installation. Follow your distribution's instructions. If you're pretty sure you've done this correctly, create a new issue with the output of `vainfo` and if `wf-recorder -c h264_vaapi -d {}` works.", dri_device.display()),
         };
 
         let mut frames_rgb = hw_device_ctx
