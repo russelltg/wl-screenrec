@@ -1382,8 +1382,8 @@ fn parse_dict(dict: &str) -> Result<dictionary::Owned, ffmpeg::Error> {
         let res = av_dict_parse_string(
             &mut ptr,
             cstr.as_ptr(),
-            b"=:\0".as_ptr().cast(),
-            b",\0".as_ptr().cast(),
+            c"=:".as_ptr().cast(),
+            c",".as_ptr().cast(),
             0,
         );
         if res != 0 {
@@ -1643,10 +1643,8 @@ impl EncState {
             }
         } else {
             let mut enc_options = passed_enc_options.clone();
-            if encoder.name() == "x264" {
-                if enc_options.get("preset").is_none() {
-                    enc_options.set("preset", "ultrafast");
-                }
+            if encoder.name() == "x264" && enc_options.get("preset").is_none() {
+                enc_options.set("preset", "ultrafast");
             }
             enc.open_with(enc_options).unwrap()
         };
@@ -1897,7 +1895,7 @@ fn video_filter(
         let buffersrc_ctx = avfilter_graph_alloc_filter(
             g.as_mut_ptr(),
             filter::find("buffer").unwrap().as_mut_ptr(),
-            "in\0".as_ptr() as _,
+            c"in".as_ptr() as _,
         );
         if buffersrc_ctx.is_null() {
             panic!("faield to alloc buffersrc filter");
