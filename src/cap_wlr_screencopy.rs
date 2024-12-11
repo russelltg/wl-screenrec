@@ -17,7 +17,7 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
+use crate::{CaptureSource, DmabufFormat, DrmModifier, ReadyCopySource, State};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(
@@ -62,7 +62,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                     let device = cap.drm_device.clone();
                     if state
                         .negotiate_format(
-                            &[DmabufPotentialFormat {
+                            &[DmabufFormat {
                                 fourcc,
                                 modifiers: vec![DrmModifier::LINEAR],
                             }],
@@ -74,7 +74,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                         return; // error, which has already been reported
                     }
                 }
-                state.on_copy_src_ready(dmabuf_width, dmabuf_height, fourcc, qhandle, capture);
+                state.on_copy_src_ready(
+                    ReadyCopySource {
+                        w: dmabuf_width,
+                        h: dmabuf_height,
+                        format: fourcc,
+                        frame: capture.clone(),
+                    },
+                    qhandle,
+                );
             }
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
@@ -150,7 +158,7 @@ impl CaptureSource for CapWlrScreencopy {
     fn queue_capture_frame(
         &self,
         eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
+    ) -> Option<ReadyCopySource<Self::Frame>> {
         // creating this triggers the linux_dmabuf event, which is where we allocate etc
 
         let _capture = self
