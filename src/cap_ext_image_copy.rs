@@ -162,7 +162,9 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
                 let (hi, lo, n) = state.enc.unwrap().cap.time.take().unwrap();
                 state.on_copy_complete(qhandle, hi, lo, n);
             }
-            Failed { .. } => todo!(),
+            Failed { .. } => {
+                state.on_copy_fail(qhandle);
+            }
             _ => {}
         }
     }
