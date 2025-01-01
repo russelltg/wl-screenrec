@@ -1190,8 +1190,17 @@ impl<S: CaptureSource + 'static> State<S> {
         let CompleteState {
             output_went_away,
             output,
+            cap,
             ..
         } = self.enc.unwrap();
+
+        let (destroy_surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
+            self.surfaces_owned_by_compositor.pop_front().unwrap();
+        drop(drop_mapping);
+        destroy_buffer_params.destroy();
+        cap.on_done_with_frame(destroy_frame);
+        destroy_buffer.destroy();
+        drop(destroy_surf);
 
         if *output_went_away {
             info!(
@@ -1213,8 +1222,10 @@ impl<S: CaptureSource + 'static> State<S> {
             }
             self.enc = EncConstructionStage::OutputWentAway(owa);
         } else {
-            error!("unknown copy fail reason, quitting");
-            self.quit_flag.store(1, SeqCst)
+            error!("unknown copy fail reason, trying to capture a new frame");
+            if let Some((w, h, fmt, frame)) = cap.queue_capture_frame(qhandle) {
+                self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
+            }
         }
     }
 
