@@ -67,9 +67,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
     ) {
         match event {
             ext_image_copy_capture_session_v1::Event::BufferSize { width, height } => {
-                if let ExtImageCopyState::Probing(_, size, _) = &mut state.enc.unwrap_cap().state {
-                    *size = Some((width, height))
-                }
+                state.enc.unwrap_cap().in_progress_constraints.buffer_size = Some((width, height));
             }
             ext_image_copy_capture_session_v1::Event::ShmFormat { .. } => {}
             ext_image_copy_capture_session_v1::Event::DmabufDevice { device } => {
@@ -80,9 +78,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                     .unwrap()
                     .unwrap();
                 let path = node.dev_path().unwrap();
-                if let ExtImageCopyState::Probing(_, _, dev) = &mut state.enc.unwrap_cap().state {
-                    *dev = Some(path);
-                }
+                state.enc.unwrap_cap().in_progress_constraints.dmabuf_device = Some(path);
             }
             ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
                 assert!(modifiers.len() % 8 == 0);
@@ -92,36 +88,45 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                     .collect();
 
                 if let Ok(fourcc) = DrmFourcc::try_from(format) {
-                    if let ExtImageCopyState::Probing(formats, _, _) =
-                        &mut state.enc.unwrap_cap().state
-                    {
-                        formats.push(DmabufPotentialFormat { fourcc, modifiers })
-                    }
+                    state
+                        .enc
+                        .unwrap_cap()
+                        .in_progress_constraints
+                        .dmabuf_formats
+                        .push(DmabufPotentialFormat { fourcc, modifiers });
                 } else {
                     warn!("Unknown DRM Fourcc: 0x{:08x}", format)
                 }
             }
             ext_image_copy_capture_session_v1::Event::Done => {
-                // decide on format
-                let probed = if let ExtImageCopyState::Probing(formats, size, dev) =
-                    &state.enc.unwrap_cap().state
-                {
-                    Some((formats.clone(), size, dev.clone()))
-                } else {
-                    None
+                let mut constraints = BufferConstraints {
+                    dmabuf_formats: Vec::new(),
+                    buffer_size: None,
+                    dmabuf_device: None,
+                };
+                // All buffer constraint events will be resent on every change, so reset
+                // accumulated state
+                std::mem::swap(
+                    &mut state.enc.unwrap_cap().in_progress_constraints,
+                    &mut constraints,
+                );
+
+                let size = constraints
+                    .buffer_size
+                    .expect("Done received before BufferSize...");
+                let fmt = state.negotiate_format(
+                    &constraints.dmabuf_formats,
+                    size,
+                    constraints.dmabuf_device.as_deref(),
+                );
+                let Some(fmt) = fmt else {
+                    // error, it's already reported so we just have to cleanup & exit
+                    return;
                 };
 
-                if let Some((formats, size, dev)) = probed {
-                    let size = size.expect("Done received before BufferSize...");
-                    let fmt = state.negotiate_format(&formats, size, dev.as_deref());
-                    if let Some(fmt) = fmt {
-                        state.enc.unwrap_cap().state = ExtImageCopyState::Ready(fmt, size);
-                    } else {
-                        return; // error, it's already reported so we just have to cleanup & exit
-                    }
-                }
-
                 let cap = state.enc.unwrap_cap();
+                cap.current_config = Some((fmt, size));
+
                 let (width, height, format, frame) = cap
                     .queue_capture_frame(qhandle)
                     .expect("Done without size/format!");
@@ -163,19 +168,18 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
     }
 }
 
-enum ExtImageCopyState {
-    Probing(
-        Vec<DmabufPotentialFormat>,
-        Option<(u32, u32)>,
-        Option<PathBuf>,
-    ),
-    Ready(DmabufFormat, (u32, u32)),
+/** Struct to collect buffer constraint information as the events arrive */
+struct BufferConstraints {
+    dmabuf_formats: Vec<DmabufPotentialFormat>,
+    buffer_size: Option<(u32, u32)>,
+    dmabuf_device: Option<PathBuf>,
 }
 
 pub struct CapExtImageCopy {
     output_capture_session: ExtImageCopyCaptureSessionV1,
     time: Option<(u32, u32, u32)>,
-    state: ExtImageCopyState,
+    in_progress_constraints: BufferConstraints,
+    current_config: Option<(DmabufFormat, (u32, u32))>,
 }
 
 impl CaptureSource for CapExtImageCopy {
@@ -212,7 +216,12 @@ impl CaptureSource for CapExtImageCopy {
         Ok(Self {
             output_capture_session,
             time: None,
-            state: ExtImageCopyState::Probing(Vec::new(), None, None),
+            in_progress_constraints: BufferConstraints {
+                dmabuf_formats: Vec::new(),
+                buffer_size: None,
+                dmabuf_device: None,
+            },
+            current_config: None,
         })
     }
 
@@ -220,7 +229,7 @@ impl CaptureSource for CapExtImageCopy {
         &self,
         eq: &QueueHandle<crate::State<Self>>,
     ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
-        if let ExtImageCopyState::Ready(fmt, (w, h)) = &self.state {
+        if let Some((fmt, (w, h))) = &self.current_config {
             let frame = self.output_capture_session.create_frame(eq, ());
             Some((*w, *h, fmt.fourcc, frame))
         } else {
