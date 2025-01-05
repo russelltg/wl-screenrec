@@ -9,6 +9,9 @@ use ffmpeg::{
     format::Pixel,
     frame,
 };
+use log::error;
+
+use crate::DrmModifier;
 
 pub struct AvHwDevCtx {
     ptr: *mut ffmpeg::sys::AVBufferRef,
@@ -45,6 +48,7 @@ impl AvHwDevCtx {
         pixfmt: Pixel,
         width: i32,
         height: i32,
+        modifier: DrmModifier,
     ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
             let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
@@ -56,6 +60,10 @@ impl AvHwDevCtx {
             (*hwframe_casted).width = width;
             (*hwframe_casted).height = height;
             (*hwframe_casted).initial_pool_size = 5;
+
+            if modifier != DrmModifier::LINEAR {
+                error!("unknown how to request non-linear frames in vaapi");
+            }
 
             let sts = av_hwframe_ctx_init(hwframe);
             if sts != 0 {

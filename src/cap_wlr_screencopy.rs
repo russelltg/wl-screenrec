@@ -57,24 +57,18 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             } => {
                 let fourcc = DrmFourcc::try_from(format).unwrap();
                 let cap = state.enc.unwrap_cap();
-                if !cap.sent_format {
-                    cap.sent_format = true;
-                    let device = cap.drm_device.clone();
-                    if state
-                        .negotiate_format(
-                            &[DmabufPotentialFormat {
-                                fourcc,
-                                modifiers: vec![DrmModifier::LINEAR],
-                            }],
-                            (dmabuf_width, dmabuf_height),
-                            device.as_deref(),
-                        )
-                        .is_none()
-                    {
-                        return; // error, which has already been reported
-                    }
-                }
-                state.on_copy_src_ready(dmabuf_width, dmabuf_height, fourcc, qhandle, capture);
+
+                let device = cap.drm_device.clone();
+                state.negotiate_format(
+                    &[DmabufPotentialFormat {
+                        fourcc,
+                        modifiers: vec![DrmModifier::LINEAR],
+                    }],
+                    (dmabuf_width, dmabuf_height),
+                    device.as_deref(),
+                    qhandle,
+                );
+                state.on_frame_allocd(qhandle, capture);
             }
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
@@ -114,7 +108,6 @@ impl Dispatch<ZwpLinuxDmabufFeedbackV1, ()> for State<CapWlrScreencopy> {
 pub struct CapWlrScreencopy {
     screencopy_manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
-    sent_format: bool,
     drm_device: Option<PathBuf>,
 }
 impl CaptureSource for CapWlrScreencopy {
@@ -134,12 +127,11 @@ impl CaptureSource for CapWlrScreencopy {
         Ok(Self {
             screencopy_manager: man,
             output,
-            sent_format: false,
             drm_device: None,
         })
     }
 
-    fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, capture: &Self::Frame) {
+    fn queue_copy(&self, damage: bool, buf: &WlBuffer, capture: &Self::Frame) {
         if damage {
             capture.copy_with_damage(buf);
         } else {
@@ -147,10 +139,7 @@ impl CaptureSource for CapWlrScreencopy {
         }
     }
 
-    fn queue_capture_frame(
-        &self,
-        eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
+    fn alloc_frame(&self, eq: &QueueHandle<State<Self>>) -> Option<Self::Frame> {
         // creating this triggers the linux_dmabuf event, which is where we allocate etc
 
         let _capture = self
