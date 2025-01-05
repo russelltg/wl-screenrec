@@ -40,6 +40,10 @@ clap_complete = "4.5.8"
 log-once = "0.4.1"
 drm = "0.14.0"
 
+# [patch.crates-io]
+# ffmpeg-next = { path = "../rust-ffmpeg" }
+# ffmpeg-sys-next = { path = "../rust-ffmpeg-sys" }
+
 
 [dev-dependencies]
 nix = { version = "0.29.0", default-features = false, features = [
