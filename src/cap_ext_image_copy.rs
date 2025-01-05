@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Context;
 use drm::{buffer::DrmFourcc, node::DrmNode};
 use libc::dev_t;
-use log::warn;
+use log::{debug, warn};
 use log_once::warn_once;
 use wayland_client::{
     globals::GlobalList, protocol::wl_output::WlOutput, Dispatch, Proxy, QueueHandle,
@@ -20,7 +20,7 @@ use wayland_protocols::ext::{
     },
 };
 
-use crate::{CaptureSource, DmabufFormat, DmabufPotentialFormat, DrmModifier, State};
+use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
 
 impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for State<CapExtImageCopy> {
     fn event(
@@ -99,11 +99,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                 }
             }
             ext_image_copy_capture_session_v1::Event::Done => {
-                let mut constraints = BufferConstraints {
-                    dmabuf_formats: Vec::new(),
-                    buffer_size: None,
-                    dmabuf_device: None,
-                };
+                let mut constraints = BufferConstraints::default();
                 // All buffer constraint events will be resent on every change, so reset
                 // accumulated state
                 std::mem::swap(
@@ -114,28 +110,17 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                 let size = constraints
                     .buffer_size
                     .expect("Done received before BufferSize...");
-                let fmt = state.negotiate_format(
+                state.negotiate_format(
                     &constraints.dmabuf_formats,
                     size,
                     constraints.dmabuf_device.as_deref(),
+                    qhandle,
                 );
-                let Some(fmt) = fmt else {
-                    // error, it's already reported so we just have to cleanup & exit
-                    return;
-                };
-
-                let cap = state.enc.unwrap_cap();
-                cap.current_config = Some((fmt, size));
-
-                let (width, height, format, frame) = cap
-                    .queue_capture_frame(qhandle)
-                    .expect("Done without size/format!");
-                state.on_copy_src_ready(width, height, format, qhandle, &frame);
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {
                 state.on_copy_fail(qhandle); // untested if this actually works
             }
-            _ => todo!(),
+            _ => {}
         }
     }
 }
@@ -151,8 +136,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
     ) {
         use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::Event::*;
         match event {
-            Transform { .. } => {}
-            Damage { .. } => {} // TODO: maybe this is how you implement damage
+            Transform { .. } => {} // TODO: use this
+            Damage { .. } => {}    // TODO: maybe this is how you implement damage
             PresentationTime {
                 tv_sec_hi,
                 tv_sec_lo,
@@ -162,15 +147,17 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
                 let (hi, lo, n) = state.enc.unwrap().cap.time.take().unwrap();
                 state.on_copy_complete(qhandle, hi, lo, n);
             }
-            Failed { .. } => {
+            Failed { reason } => {
+                debug!("frame copy failed: {reason:?}");
                 state.on_copy_fail(qhandle);
             }
-            _ => {}
+            _ => todo!(),
         }
     }
 }
 
 /** Struct to collect buffer constraint information as the events arrive */
+#[derive(Default)]
 struct BufferConstraints {
     dmabuf_formats: Vec<DmabufPotentialFormat>,
     buffer_size: Option<(u32, u32)>,
@@ -181,7 +168,6 @@ pub struct CapExtImageCopy {
     output_capture_session: ExtImageCopyCaptureSessionV1,
     time: Option<(u32, u32, u32)>,
     in_progress_constraints: BufferConstraints,
-    current_config: Option<(DmabufFormat, (u32, u32))>,
 }
 
 impl CaptureSource for CapExtImageCopy {
@@ -218,28 +204,17 @@ impl CaptureSource for CapExtImageCopy {
         Ok(Self {
             output_capture_session,
             time: None,
-            in_progress_constraints: BufferConstraints {
-                dmabuf_formats: Vec::new(),
-                buffer_size: None,
-                dmabuf_device: None,
-            },
-            current_config: None,
+            in_progress_constraints: BufferConstraints::default(),
         })
     }
 
-    fn queue_capture_frame(
-        &self,
-        eq: &QueueHandle<crate::State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)> {
-        if let Some((fmt, (w, h))) = &self.current_config {
-            let frame = self.output_capture_session.create_frame(eq, ());
-            Some((*w, *h, fmt.fourcc, frame))
-        } else {
-            None
-        }
+    fn alloc_frame(&self, eq: &QueueHandle<crate::State<Self>>) -> Option<Self::Frame> {
+        debug!("ext_image_copy_capture_session_v1::create_frame");
+        let frame = self.output_capture_session.create_frame(eq, ());
+        Some(frame)
     }
 
-    fn queue_copy_frame(
+    fn queue_copy(
         &self,
         damage: bool,
         buf: &wayland_client::protocol::wl_buffer::WlBuffer,
@@ -253,6 +228,7 @@ impl CaptureSource for CapExtImageCopy {
     }
 
     fn on_done_with_frame(&self, f: Self::Frame) {
+        debug!("ext_image_copy_capture_frame_v1::destroy");
         f.destroy();
     }
 }

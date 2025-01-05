@@ -40,7 +40,7 @@ use ffmpeg::{
         AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
-    format::{self, Pixel},
+    format::{self, Output, Pixel},
     frame::{self, video},
     media, Packet, Rational,
 };
@@ -243,11 +243,17 @@ trait CaptureSource: Sized {
         eq: &QueueHandle<State<Self>>,
         output: WlOutput,
     ) -> anyhow::Result<Self>;
-    fn queue_capture_frame(
-        &self,
-        eq: &QueueHandle<State<Self>>,
-    ) -> Option<(u32, u32, DrmFourcc, Self::Frame)>;
-    fn queue_copy_frame(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
+
+    // allocates a frame, either sync or async
+    // if async, return None and call `on_frame_allocd` at a later moment
+    // if sync, just return the allocated stuff
+    fn alloc_frame(&self, eq: &QueueHandle<State<Self>>) -> Option<Self::Frame>;
+
+    // queue a copy of the screen into `buf`
+    // call `on_copy_complete` or `on_copy_fail` when the copy has completed
+    fn queue_copy(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
+
+    // destroy the `frame` object
     fn on_done_with_frame(&self, f: Self::Frame);
 }
 
@@ -510,10 +516,12 @@ struct DmabufPotentialFormat {
     modifiers: Vec<DrmModifier>,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct DmabufFormat {
+    width: i32,
+    height: i32,
     fourcc: DrmFourcc,
-    _modifier: DrmModifier,
+    modifier: DrmModifier,
 }
 
 #[link(name = "drm")]
@@ -523,13 +531,7 @@ extern "C" {
 }
 
 struct State<S: CaptureSource> {
-    pub(crate) surfaces_owned_by_compositor: VecDeque<(
-        frame::Video,
-        video::Video,
-        ZwpLinuxBufferParamsV1,
-        S::Frame,
-        WlBuffer,
-    )>,
+    in_flight_surface: InFlightSurface<S>,
     dma: ZwpLinuxDmabufV1,
     enc: EncConstructionStage<S>,
     starting_timestamp: Option<i64>,
@@ -539,6 +541,23 @@ struct State<S: CaptureSource> {
     sigusr1_flag: Arc<AtomicBool>,
     gm: GlobalList,
     xdg_output_manager: ZxdgOutputManagerV1,
+}
+
+enum InFlightSurface<S: CaptureSource> {
+    None,
+    AllocQueued,
+    Allocd(S::Frame),
+    CopyQueued {
+        av_surface: frame::Video,
+        av_mapping: video::Video,
+        wl_frame: S::Frame,
+        wl_buffer: WlBuffer,
+    },
+}
+impl<S: CaptureSource> InFlightSurface<S> {
+    fn take(&mut self) -> InFlightSurface<S> {
+        mem::replace(self, InFlightSurface::None)
+    }
 }
 
 struct ProbingOutputsState {
@@ -865,7 +884,7 @@ impl<S: CaptureSource + 'static> State<S> {
 
         Ok((
             State {
-                surfaces_owned_by_compositor: VecDeque::new(),
+                in_flight_surface: InFlightSurface::None,
                 dma,
                 enc: EncConstructionStage::ProbingOutputs(ProbingOutputsState {
                     partial_outputs,
@@ -883,40 +902,46 @@ impl<S: CaptureSource + 'static> State<S> {
         ))
     }
 
-    fn on_copy_src_ready(
-        &mut self,
-        dmabuf_width: u32,
-        dmabuf_height: u32,
-        format: DrmFourcc,
-        qhandle: &QueueHandle<State<S>>,
-        frame: &S::Frame,
-    ) {
+    fn on_frame_allocd(&mut self, qhandle: &QueueHandle<State<S>>, frame: &S::Frame) {
+        assert!(matches!(
+            self.in_flight_surface,
+            InFlightSurface::AllocQueued
+        ));
+        self.in_flight_surface = InFlightSurface::Allocd(frame.clone());
+
         match &mut self.enc {
             EncConstructionStage::ProbingOutputs { .. } => unreachable!(
                 "Oops, somehow created a screencopy frame without initial enc state stuff?"
             ),
             EncConstructionStage::EverythingButFormat { .. } => {
-                panic!("you need to call negotiate_format before on_copy_src_ready")
+                // queue_frame_capture will be called in negotiate_format
             }
             EncConstructionStage::OutputWentAway(_) => {
                 panic!("copy_src_ready called when the output went away??")
             }
             EncConstructionStage::Intermediate => panic!("enc left in intermediate state"),
-            EncConstructionStage::Complete(_) => {}
+            EncConstructionStage::Complete(_) => {
+                self.queue_frame_capture(qhandle);
+            }
         }
-
+    }
+    fn queue_frame_capture(&mut self, qhandle: &QueueHandle<Self>) {
         let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
-        let surf = enc.frames_rgb.alloc().unwrap();
+        let InFlightSurface::Allocd(frame) = &self.in_flight_surface else {
+            panic!("queue_frame_capture called in a strange state");
+        };
 
-        let (desc, mapping) = map_drm(&surf);
+        let av_surface = enc.frames_rgb.alloc().unwrap();
+
+        let (desc, av_mapping) = map_drm(&av_surface);
 
         let modifier = desc.objects[0].format_modifier.to_be_bytes();
         let stride = desc.layers[0].planes[0].pitch as u32;
         let fd = unsafe { BorrowedFd::borrow_raw(desc.objects[0].fd) };
 
-        let dma_params = self.dma.create_params(qhandle, ());
-        dma_params.add(
+        let wl_buffer_params = self.dma.create_params(qhandle, ());
+        wl_buffer_params.add(
             fd,
             0,
             0,
@@ -925,24 +950,133 @@ impl<S: CaptureSource + 'static> State<S> {
             u32::from_be_bytes(modifier[4..].try_into().unwrap()),
         );
 
-        let buf = dma_params.create_immed(
-            dmabuf_width as i32,
-            dmabuf_height as i32,
-            format as u32,
+        let wl_buffer = wl_buffer_params.create_immed(
+            enc.selected_format.width,
+            enc.selected_format.height,
+            enc.selected_format.fourcc as u32,
             zwp_linux_buffer_params_v1::Flags::empty(),
             qhandle,
             (),
         );
 
-        cap.queue_copy_frame(self.args.damage, &buf, frame);
+        cap.queue_copy(self.args.damage, &wl_buffer, frame);
 
-        self.surfaces_owned_by_compositor.push_back((
-            surf,
-            mapping,
-            dma_params,
-            frame.clone(),
-            buf,
-        ));
+        self.in_flight_surface = InFlightSurface::CopyQueued {
+            av_surface,
+            av_mapping,
+            wl_frame: frame.clone(),
+            wl_buffer,
+        };
+    }
+
+    fn on_new_capture_format(
+        &mut self,
+        mut cs: CompleteState<S>,
+        new_format: DmabufFormat,
+    ) -> anyhow::Result<CompleteState<S>> {
+        if new_format == cs.enc.selected_format {
+            return Ok(cs);
+        }
+        info!("compositor gave new format {new_format:?}");
+
+        // destroy old frames
+        match &self.in_flight_surface {
+            InFlightSurface::Allocd(_) => {} // these frames are format independent, the previously allocated one is fine
+            InFlightSurface::CopyQueued {
+                wl_frame,
+                wl_buffer,
+                ..
+            } => {
+                cs.cap.on_done_with_frame(wl_frame.clone());
+                wl_buffer.destroy();
+                self.in_flight_surface = InFlightSurface::None;
+            }
+            InFlightSurface::None => {}
+            InFlightSurface::AllocQueued => {}
+        }
+
+        let capture_pixfmt = dmabuf_to_av(new_format.fourcc);
+
+        // make sure bounds are still valid, as size may have changed
+        cs.enc.roi_screen_coord = cs
+            .enc
+            .roi_screen_coord
+            .fit_inside_bounds(new_format.width, new_format.height);
+
+        if cs.enc.roi_screen_coord.w == 0 || cs.enc.roi_screen_coord.h == 0 {
+            bail!("new capture surface is zero-sized, bailing");
+        }
+
+        cs.enc.frames_rgb = cs.enc.hw_device_ctx
+            .create_frame_ctx(capture_pixfmt, new_format.width, new_format.height, new_format.modifier)
+            .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {new_format:?}"))?;
+
+        // todo: proper size here
+        let enc_pixfmt_av = match cs.enc.enc_pixfmt {
+            EncodePixelFormat::Vaapi(fmt) => fmt,
+            EncodePixelFormat::Sw(fmt) => fmt,
+        };
+
+        cs.enc.selected_format = new_format;
+
+        // flush old filter & encoder
+        cs.enc
+            .video_filter
+            .get("in")
+            .unwrap()
+            .source()
+            .flush()
+            .unwrap();
+        cs.enc.process_ready();
+        if cs.enc.enc_video_has_been_fed_any_frames {
+            // ffmpeg bug--if you call send_eof before feeding any frames it will crash
+            cs.enc.enc_video.send_eof().unwrap();
+        }
+        cs.enc.process_ready();
+
+        // create a new encoder
+        // TODO: correct scaling
+        let mut frames_yuv = cs.enc.hw_device_ctx
+            .create_frame_ctx(enc_pixfmt_av, cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h, DrmModifier::LINEAR)
+            .with_context(|| {
+                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {}x{}", cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h)
+            })?;
+
+        let encoder = cs.enc.enc_video.codec().unwrap();
+        let framerate = cs.enc.enc_video.frame_rate();
+        let global_header = cs
+            .enc
+            .octx
+            .format()
+            .flags()
+            .contains(format::Flags::GLOBAL_HEADER);
+        let enc = make_video_params(
+            &self.args,
+            cs.enc.enc_pixfmt,
+            &encoder,
+            (cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h),
+            framerate,
+            global_header,
+            &mut cs.enc.hw_device_ctx,
+            &mut frames_yuv,
+        )?;
+
+        cs.enc.enc_video = enc.open_with(cs.enc.enc_video_options.clone())?;
+        cs.enc.enc_video_has_been_fed_any_frames = false;
+
+        let (filter, filter_timebase) = video_filter(
+            &mut cs.enc.frames_rgb,
+            cs.enc.enc_pixfmt,
+            (new_format.width, new_format.height),
+            cs.enc.roi_screen_coord,
+            (cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h),
+            cs.enc.transform,
+        );
+        cs.enc.video_filter = filter;
+        cs.enc.filter_output_timebase = filter_timebase;
+        cs.enc.format_change = true;
+
+        Ok(cs)
     }
 
     fn update_output_info_wl_output(
@@ -1015,17 +1149,13 @@ impl<S: CaptureSource + 'static> State<S> {
                         let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate)
                             .take_enc();
                         let cap = S::new(&self.gm, qhandle, info.output.clone()).unwrap();
-                        let queue_ret = cap.queue_capture_frame(qhandle);
                         self.enc = EncConstructionStage::Complete(CompleteState {
                             enc,
                             cap,
                             output: info,
                             output_went_away: false,
                         });
-
-                        if let Some((w, h, fmt, frame)) = queue_ret {
-                            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
-                        }
+                        self.queue_alloc_frame(qhandle);
                     }
                 }
             }
@@ -1128,17 +1258,14 @@ impl<S: CaptureSource + 'static> State<S> {
                 return;
             }
         };
-
-        let queue_ret = cap.queue_capture_frame(qhandle);
+        debug!("siopc");
         self.enc = EncConstructionStage::EverythingButFormat {
             roi,
             cap,
             output: output.clone(),
         };
 
-        if let Some((w, h, fmt, frame)) = queue_ret {
-            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
-        }
+        self.queue_alloc_frame(qhandle);
     }
 
     fn on_copy_complete(
@@ -1148,17 +1275,25 @@ impl<S: CaptureSource + 'static> State<S> {
         tv_sec_lo: u32,
         tv_nsec: u32,
     ) {
+        debug!("on_copy_complete");
         let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
         self.fps_counter.on_frame();
 
-        let (mut surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
-            self.surfaces_owned_by_compositor.pop_front().unwrap();
-
-        drop(drop_mapping);
-        destroy_buffer_params.destroy();
-        cap.on_done_with_frame(destroy_frame);
-        destroy_buffer.destroy();
+        let mut surf = if let InFlightSurface::CopyQueued {
+            av_surface,
+            av_mapping,
+            wl_frame,
+            wl_buffer,
+        } = self.in_flight_surface.take()
+        {
+            drop(av_mapping);
+            cap.on_done_with_frame(wl_frame);
+            wl_buffer.destroy();
+            av_surface
+        } else {
+            panic!("on_copy_complete called in a strange state")
+        };
 
         let secs = (i64::from(tv_sec_hi) << 32) + i64::from(tv_sec_lo);
         let pts_abs = secs * 1_000_000_000 + i64::from(tv_nsec);
@@ -1181,9 +1316,7 @@ impl<S: CaptureSource + 'static> State<S> {
 
         enc.push(surf);
 
-        if let Some((w, h, fmt, frame)) = cap.queue_capture_frame(qhandle) {
-            self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
-        }
+        self.queue_alloc_frame(qhandle);
     }
 
     fn on_copy_fail(&mut self, qhandle: &QueueHandle<Self>) {
@@ -1191,16 +1324,23 @@ impl<S: CaptureSource + 'static> State<S> {
             output_went_away,
             output,
             cap,
-            ..
+            enc,
         } = self.enc.unwrap();
 
-        let (destroy_surf, drop_mapping, destroy_buffer_params, destroy_frame, destroy_buffer) =
-            self.surfaces_owned_by_compositor.pop_front().unwrap();
-        drop(drop_mapping);
-        destroy_buffer_params.destroy();
-        cap.on_done_with_frame(destroy_frame);
-        destroy_buffer.destroy();
-        drop(destroy_surf);
+        if let InFlightSurface::CopyQueued {
+            av_surface,
+            av_mapping,
+            wl_frame,
+            wl_buffer,
+        } = self.in_flight_surface.take()
+        {
+            drop(av_mapping);
+            cap.on_done_with_frame(wl_frame);
+            wl_buffer.destroy();
+            drop(av_surface);
+        } else {
+            panic!("on_copy_fail called in strange state");
+        }
 
         if *output_went_away {
             info!(
@@ -1221,11 +1361,13 @@ impl<S: CaptureSource + 'static> State<S> {
                 }
             }
             self.enc = EncConstructionStage::OutputWentAway(owa);
+        } else if enc.format_change {
+            enc.format_change = false;
+            debug!("failed transfer, but just did a format change so not surprising. trying to capture a new frame...");
+            self.queue_alloc_frame(qhandle);
         } else {
-            error!("unknown copy fail reason, trying to capture a new frame");
-            if let Some((w, h, fmt, frame)) = cap.queue_capture_frame(qhandle) {
-                self.on_copy_src_ready(w, h, fmt, qhandle, &frame);
-            }
+            error!("unknown copy fail reason, trying to capture a new frame...");
+            self.queue_alloc_frame(qhandle);
         }
     }
 
@@ -1234,8 +1376,9 @@ impl<S: CaptureSource + 'static> State<S> {
         capture_formats: &[DmabufPotentialFormat],
         (w, h): (u32, u32),
         dri_device: Option<&Path>,
-    ) -> Option<DmabufFormat> {
-        debug!("Supported capture formats are {capture_formats:?}");
+        eq: &QueueHandle<State<S>>,
+    ) {
+        debug!("Supported capture formats are {w}x{h} {capture_formats:?}");
         let dri_device = if let Some(dev) = &self.args.dri_device {
             Path::new(dev)
         } else if let Some(dev) = dri_device {
@@ -1245,43 +1388,107 @@ impl<S: CaptureSource + 'static> State<S> {
             Path::new("/dev/dri/renderD128")
         };
 
+        fn negotiate_format_impl(
+            width: i32,
+            height: i32,
+            capture_formats: &[DmabufPotentialFormat],
+        ) -> anyhow::Result<DmabufFormat> {
+            let mut selected_format = None;
+            for preferred_format in [
+                DrmFourcc::Xrgb8888,
+                DrmFourcc::Xbgr8888,
+                DrmFourcc::Xrgb2101010,
+            ] {
+                let is_fmt_supported = capture_formats.iter().any(|p| {
+                    p.fourcc == preferred_format
+                        && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
+                });
+
+                if is_fmt_supported {
+                    selected_format = Some(DmabufFormat {
+                        fourcc: preferred_format,
+                        modifier: DrmModifier::LINEAR,
+                        width,
+                        height,
+                    });
+                    break;
+                }
+            }
+            Ok( match selected_format {
+            Some(sf) => sf,
+            None =>
+                bail!("failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}", capture_formats),
+        })
+        }
+
+        let selected_format = match negotiate_format_impl(w as i32, h as i32, capture_formats) {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to negotiate format: {e}");
+                return;
+            }
+        };
+
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::EverythingButFormat { output, roi, cap } => {
                 let enc = match EncState::new(
                     &self.args,
-                    capture_formats,
+                    selected_format,
                     output.refresh,
                     output.transform,
-                    (w as i32, h as i32),
                     roi,
                     Arc::clone(&self.sigusr1_flag),
                     dri_device,
                 ) {
                     Ok(enc) => enc,
                     Err(e) => {
-                        error!("failed to create encoder(s): {}", e);
+                        error!("failed to create encoder(s): {e}");
                         self.quit_flag.store(1, SeqCst);
-                        return None;
+                        return;
                     }
                 };
 
-                let selected_format = enc.selected_format;
                 self.enc = EncConstructionStage::Complete(CompleteState {
                     enc,
                     cap,
                     output,
                     output_went_away: false,
                 });
-
-                Some(selected_format)
             }
-            EncConstructionStage::Complete(c) => {
-                // can happen on dispaly disconnect & reconnect
-                let selected_format = c.enc.selected_format;
+            EncConstructionStage::Complete(mut c) => {
+                // can happen on dispaly disconnect & reconnect OR output resize
+                c = match self.on_new_capture_format(c, selected_format) {
+                    Ok(enc) => enc,
+                    Err(e) => {
+                        error!("failed to renegotiate new format {selected_format:?}: {e}");
+                        self.quit_flag.store(1, SeqCst);
+                        return;
+                    }
+                };
                 self.enc = EncConstructionStage::Complete(c);
-                Some(selected_format)
             }
             _ => panic!("called negotiate_format in a strange state"),
+        }
+
+        // make the next sensible step in capture
+        match &self.in_flight_surface {
+            InFlightSurface::None => {
+                self.queue_alloc_frame(eq);
+            }
+            InFlightSurface::AllocQueued => {} // nothing to do
+            InFlightSurface::Allocd(_) => {
+                self.queue_frame_capture(eq);
+            }
+            InFlightSurface::CopyQueued { .. } => {}
+        }
+    }
+
+    fn queue_alloc_frame(&mut self, eq: &QueueHandle<State<S>>) {
+        assert!(matches!(self.in_flight_surface, InFlightSurface::None));
+        let f = self.enc.unwrap_cap().alloc_frame(eq);
+        self.in_flight_surface = InFlightSurface::AllocQueued;
+        if let Some(f) = f {
+            self.on_frame_allocd(eq, &f);
         }
     }
 }
@@ -1289,6 +1496,7 @@ impl<S: CaptureSource + 'static> State<S> {
 struct EncState {
     video_filter: filter::Graph,
     enc_video: encoder::Video,
+    enc_video_has_been_fed_any_frames: bool,
     octx: format::context::Output,
     frames_rgb: AvHwFrameCtx,
     filter_output_timebase: Rational,
@@ -1297,6 +1505,12 @@ struct EncState {
     sigusr1_flag: Arc<AtomicBool>,
     audio: Option<AudioHandle>,
     selected_format: DmabufFormat,
+    hw_device_ctx: AvHwDevCtx,
+    enc_pixfmt: EncodePixelFormat,
+    roi_screen_coord: Rect,
+    transform: Transform,
+    enc_video_options: dictionary::Owned<'static>,
+    format_change: bool,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1361,7 +1575,7 @@ fn make_video_params(
     Ok(enc)
 }
 
-fn parse_dict(dict: &str) -> Result<dictionary::Owned, ffmpeg::Error> {
+fn parse_dict<'a>(dict: &str) -> Result<dictionary::Owned<'a>, ffmpeg::Error> {
     let cstr = CString::new(dict).unwrap();
 
     let mut ptr = null_mut();
@@ -1369,8 +1583,8 @@ fn parse_dict(dict: &str) -> Result<dictionary::Owned, ffmpeg::Error> {
         let res = av_dict_parse_string(
             &mut ptr,
             cstr.as_ptr(),
-            b"=:\0".as_ptr().cast(),
-            b",\0".as_ptr().cast(),
+            c"=:".as_ptr().cast(),
+            c",".as_ptr().cast(),
             0,
         );
         if res != 0 {
@@ -1381,14 +1595,82 @@ fn parse_dict(dict: &str) -> Result<dictionary::Owned, ffmpeg::Error> {
     }
 }
 
+fn get_encoder(args: &Args, format: &Output) -> anyhow::Result<ffmpeg::Codec> {
+    Ok(if let Some(encoder_name) = &args.ffmpeg_encoder {
+        ffmpeg_next::encoder::find_by_name(encoder_name).ok_or_else(|| {
+            format_err!(
+                "Encoder {encoder_name} specified with --ffmpeg-encoder could not be instntiated"
+            )
+        })?
+    } else {
+        let codec_id = match args.codec {
+            Codec::Auto => format.codec(&args.filename, media::Type::Video),
+            Codec::Avc => codec::Id::H264,
+            Codec::Hevc => codec::Id::HEVC,
+            Codec::VP8 => codec::Id::VP8,
+            Codec::VP9 => codec::Id::VP9,
+            Codec::AV1 => codec::Id::AV1,
+        };
+
+        let maybe_hw_codec = if args.hw {
+            if let Some(hw_codec_name) = vaapi_codec_id(codec_id) {
+                if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
+                    Some(codec)
+                } else {
+                    warn!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
+                    None
+                }
+            } else {
+                warn!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
+                None
+            }
+        } else {
+            None
+        };
+
+        match maybe_hw_codec {
+            Some(codec) => codec,
+            None => match ffmpeg_next::encoder::find(codec_id) {
+                Some(codec) => codec,
+                None => {
+                    bail!("Failed to get any encoder for codec {codec_id:?}");
+                }
+            },
+        }
+    })
+}
+
+fn get_enc_pixfmt(args: &Args, encoder: &ffmpeg::Codec) -> anyhow::Result<EncodePixelFormat> {
+    let supported_formats = supported_formats(encoder);
+    Ok(if supported_formats.is_empty() {
+        match args.encode_pixfmt {
+            Some(fmt) => EncodePixelFormat::Sw(fmt),
+            None => {
+                warn!(
+                    "codec \"{}\" does not advertize supported pixel formats, just using NV12. Pass --encode-pixfmt to suppress this warning",
+                    encoder.name()
+                );
+                EncodePixelFormat::Sw(Pixel::NV12)
+            }
+        }
+    } else if supported_formats.contains(&Pixel::VAAPI) {
+        EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
+    } else {
+        match args.encode_pixfmt {
+            None => EncodePixelFormat::Sw(supported_formats[0]),
+            Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
+            Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
+        }
+    })
+}
+
 impl EncState {
     // assumed that capture_{w,h}
     fn new(
         args: &Args,
-        capture_formats: &[DmabufPotentialFormat],
+        capture_format: DmabufFormat,
         refresh: Rational,
         transform: Transform,
-        (capture_w, capture_h): (i32, i32), // pixels
         roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
         sigusr1_flag: Arc<AtomicBool>,
         dri_device: &Path,
@@ -1405,98 +1687,12 @@ impl EncState {
             ffmpeg_next::format::output_with(&args.filename, muxer_options).unwrap()
         };
 
-        let encoder = if let Some(encoder_name) = &args.ffmpeg_encoder {
-            ffmpeg_next::encoder::find_by_name(encoder_name).ok_or_else(|| {
-                format_err!(
-                    "Encoder {encoder_name} specified with --ffmpeg-encoder could not be instntiated"
-                )
-            })?
-        } else {
-            let codec_id = match args.codec {
-                Codec::Auto => octx.format().codec(&args.filename, media::Type::Video),
-                Codec::Avc => codec::Id::H264,
-                Codec::Hevc => codec::Id::HEVC,
-                Codec::VP8 => codec::Id::VP8,
-                Codec::VP9 => codec::Id::VP9,
-                Codec::AV1 => codec::Id::AV1,
-            };
-
-            let maybe_hw_codec = if args.hw {
-                if let Some(hw_codec_name) = vaapi_codec_id(codec_id) {
-                    if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
-                        Some(codec)
-                    } else {
-                        warn!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
-                        None
-                    }
-                } else {
-                    warn!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
-                    None
-                }
-            } else {
-                None
-            };
-
-            match maybe_hw_codec {
-                Some(codec) => codec,
-                None => match ffmpeg_next::encoder::find(codec_id) {
-                    Some(codec) => codec,
-                    None => {
-                        bail!("Failed to get any encoder for codec {codec_id:?}");
-                    }
-                },
-            }
-        };
+        let encoder = get_encoder(args, &octx.format())?;
 
         // format selection: naive version, should actually see what the ffmpeg filter supports...
-        let mut selected_format = None;
-        for preferred_format in [
-            DrmFourcc::Xrgb8888,
-            DrmFourcc::Xbgr8888,
-            DrmFourcc::Xrgb2101010,
-        ] {
-            let is_fmt_supported = capture_formats.iter().any(|p| {
-                p.fourcc == preferred_format
-                    && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
-            });
+        info!("capture pixel format is {}", capture_format.fourcc);
 
-            if is_fmt_supported {
-                selected_format = Some(DmabufFormat {
-                    fourcc: preferred_format,
-                    _modifier: DrmModifier::LINEAR,
-                });
-                break;
-            }
-        }
-        let selected_format = match selected_format {
-            Some(sf) => sf,
-            None =>
-                bail!("failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}", capture_formats),
-        };
-        let capture_pixfmt = dmabuf_to_av(selected_format.fourcc);
-        info!("capture pixel format is {}", selected_format.fourcc);
-
-        let supported_formats = supported_formats(&encoder);
-        let enc_pixfmt = if supported_formats.is_empty() {
-            match args.encode_pixfmt {
-                Some(fmt) => EncodePixelFormat::Sw(fmt),
-                None => {
-                    warn!(
-                        "codec \"{}\" does not advertize supported pixel formats, just using NV12. Pass --encode-pixfmt to suppress this warning",
-                        encoder.name()
-                    );
-                    EncodePixelFormat::Sw(Pixel::NV12)
-                }
-            }
-        } else if supported_formats.contains(&Pixel::VAAPI) {
-            EncodePixelFormat::Vaapi(args.encode_pixfmt.unwrap_or(Pixel::NV12))
-        } else {
-            match args.encode_pixfmt {
-                None => EncodePixelFormat::Sw(supported_formats[0]),
-                Some(fmt) if supported_formats.contains(&fmt) => EncodePixelFormat::Sw(fmt),
-                Some(fmt) => bail!("Encoder does not support pixel format {fmt:?}"),
-            }
-        };
+        let enc_pixfmt = get_enc_pixfmt(args, &encoder)?;
         info!("encode pixel format is {enc_pixfmt:?}");
 
         let codec_id = encoder.id();
@@ -1536,8 +1732,8 @@ impl EncState {
         };
 
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(capture_pixfmt, capture_w, capture_h)
-            .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {capture_w}x{capture_h}"))?;
+            .create_frame_ctx(dmabuf_to_av(capture_format.fourcc), capture_format.width, capture_format.height, capture_format.modifier)
+            .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_format:?}"))?;
 
         let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
             Some((x, y)) => (x as i32, y as i32),
@@ -1547,7 +1743,7 @@ impl EncState {
         let (video_filter, filter_timebase) = video_filter(
             &mut frames_rgb,
             enc_pixfmt,
-            (capture_w, capture_h),
+            (capture_format.width, capture_format.height),
             roi_screen_coord,
             (enc_w_screen_coord, enc_h_screen_coord),
             transform,
@@ -1558,9 +1754,9 @@ impl EncState {
             EncodePixelFormat::Sw(fmt) => fmt,
         };
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord)
+            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord, DrmModifier::LINEAR)
             .with_context(|| {
-                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {capture_w}x{capture_h}")
+                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {enc_w_screen_coord}x{enc_h_screen_coord}")
             })?;
 
         info!("{}", video_filter.dump());
@@ -1581,7 +1777,7 @@ impl EncState {
             None => dict!(),
         };
 
-        let enc_video = if args.hw {
+        let (enc_video, enc_video_options) = if args.hw {
             let low_power_opts = {
                 let mut d = passed_enc_options.clone();
                 d.set("low_power", "1");
@@ -1597,32 +1793,35 @@ impl EncState {
             };
 
             match args.low_power {
-                LowPowerMode::Auto => match enc.open_with(low_power_opts) {
-                    Ok(enc) => enc,
+                LowPowerMode::Auto => match enc.open_with(low_power_opts.clone()) {
+                    Ok(enc) => (enc, low_power_opts),
                     Err(e) => {
                         eprintln!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning", e);
-                        make_video_params(
-                            args,
-                            enc_pixfmt,
-                            &encoder,
-                            (enc_w_screen_coord, enc_h_screen_coord),
-                            refresh,
-                            global_header,
-                            &mut hw_device_ctx,
-                            &mut frames_yuv,
-                        )?
-                        .open_with(regular_opts)?
+                        (
+                            make_video_params(
+                                args,
+                                enc_pixfmt,
+                                &encoder,
+                                (enc_w_screen_coord, enc_h_screen_coord),
+                                refresh,
+                                global_header,
+                                &mut hw_device_ctx,
+                                &mut frames_yuv,
+                            )?
+                            .open_with(regular_opts.clone())?,
+                            regular_opts,
+                        )
                     }
                 },
-                LowPowerMode::On => enc.open_with(low_power_opts)?,
-                LowPowerMode::Off => enc.open_with(regular_opts)?,
+                LowPowerMode::On => (enc.open_with(low_power_opts.clone())?, low_power_opts),
+                LowPowerMode::Off => (enc.open_with(regular_opts.clone())?, regular_opts),
             }
         } else {
             let mut enc_options = passed_enc_options.clone();
             if enc_options.get("preset").is_none() {
                 enc_options.set("preset", "ultrafast");
             }
-            enc.open_with(enc_options).unwrap()
+            (enc.open_with(enc_options.clone()).unwrap(), enc_options)
         };
 
         let mut ost_video = octx.add_stream(encoder).unwrap();
@@ -1651,14 +1850,21 @@ impl EncState {
         Ok(EncState {
             video_filter,
             enc_video,
+            enc_video_has_been_fed_any_frames: false,
             filter_output_timebase: filter_timebase,
             octx,
             vid_stream_idx,
+            hw_device_ctx,
+            enc_pixfmt,
+            roi_screen_coord,
+            transform,
+            enc_video_options,
             frames_rgb,
             history_state,
             sigusr1_flag,
             audio,
-            selected_format,
+            selected_format: capture_format,
+            format_change: false,
         })
     }
 
@@ -1709,6 +1915,7 @@ impl EncState {
         {
             // encoder has same time base as the filter, so don't do any time scaling
             self.enc_video.send_frame(&yuv_frame).unwrap();
+            self.enc_video_has_been_fed_any_frames = true;
         }
 
         let mut encoded = Packet::empty();
@@ -1858,7 +2065,6 @@ fn video_filter(
     transform: Transform,
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
-
 
     // src
     unsafe {

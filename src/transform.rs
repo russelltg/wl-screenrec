@@ -83,6 +83,20 @@ impl Rect {
             h: (y1 - y2).abs(),
         }
     }
+
+    pub fn bottom_right(&self) -> (i32, i32) {
+        (self.x + self.w, self.y + self.h)
+    }
+
+    #[must_use]
+    pub fn fit_inside_bounds(&self, w: i32, h: i32) -> Rect {
+        let mut r = *self;
+        r.x = 0.max(w.min(r.bottom_right().0) - r.w);
+        r.y = 0.max(h.min(r.bottom_right().1) - r.h);
+        r.w = r.w.min(w);
+        r.h = r.h.min(h);
+        r
+    }
 }
 
 #[cfg(test)]
@@ -92,6 +106,16 @@ mod test {
     use crate::transform::transform_is_transposed;
 
     use super::Rect;
+
+    #[test]
+    fn fit_inside_bounds() {
+        let r = Rect::new((10, 10), (20, 20));
+
+        assert_eq!(r.fit_inside_bounds(30, 30), r);
+        assert_eq!(r.fit_inside_bounds(20, 30), Rect::new((0, 10), (20, 20)));
+        assert_eq!(r.fit_inside_bounds(30, 20), Rect::new((10, 0), (20, 20)));
+        assert_eq!(r.fit_inside_bounds(10, 5), Rect::new((0, 0), (10, 5)));
+    }
 
     #[test]
     fn screen_to_frame_normal() {
