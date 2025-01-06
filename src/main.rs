@@ -1258,7 +1258,6 @@ impl<S: CaptureSource + 'static> State<S> {
                 return;
             }
         };
-        debug!("siopc");
         self.enc = EncConstructionStage::EverythingButFormat {
             roi,
             cap,
@@ -1275,7 +1274,6 @@ impl<S: CaptureSource + 'static> State<S> {
         tv_sec_lo: u32,
         tv_nsec: u32,
     ) {
-        debug!("on_copy_complete");
         let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
         self.fps_counter.on_frame();
