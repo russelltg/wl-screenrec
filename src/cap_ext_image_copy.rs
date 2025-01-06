@@ -83,7 +83,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
             ext_image_copy_capture_session_v1::Event::DmabufFormat { format, modifiers } => {
                 assert!(modifiers.len() % 8 == 0);
                 let modifiers = modifiers
-                    .windows(8)
+                    .chunks_exact(8)
                     .map(|b| DrmModifier(u64::from_ne_bytes(b.try_into().unwrap())))
                     .collect();
 
