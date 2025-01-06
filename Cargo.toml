@@ -28,7 +28,7 @@ wayland-protocols = { version = "0.32", features = [
 ] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 ffmpeg-next = "7.0.1"
-ffmpeg-sys-next = { version = "7.0.0", features = ["vulkan"] }
+ffmpeg-sys-next = { version = "7.0.0" }
 thiserror = "2.0.3"
 human-size = "0.4.2"
 signal-hook = "0.3.15"
