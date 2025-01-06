@@ -36,8 +36,8 @@ use ffmpeg::{
     ffi::{
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_dict_parse_string, av_free, av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3,
-        avformat_query_codec, AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE,
-        FF_COMPLIANCE_STRICT,
+        avfilter_graph_alloc_filter, avfilter_init_dict, avformat_query_codec,
+        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Pixel},
@@ -1847,19 +1847,19 @@ fn video_filter(
     transform: Transform,
 ) -> (filter::Graph, Rational) {
     let mut g = ffmpeg::filter::graph::Graph::new();
-    g.add(
-        &filter::find("buffer").unwrap(),
-        "in",
-        // format is bogus, will be replaced below, as we need to pass
-        // hw_frames_ctx which isn't possible with args=
-        &format!(
-            "video_size=2840x2160:pix_fmt={}:time_base=1/1000000000",
-            AVPixelFormat::AV_PIX_FMT_VAAPI as c_int
-        ),
-    )
-    .unwrap();
 
+
+    // src
     unsafe {
+        let buffersrc_ctx = avfilter_graph_alloc_filter(
+            g.as_mut_ptr(),
+            filter::find("buffer").unwrap().as_mut_ptr(),
+            c"in".as_ptr() as _,
+        );
+        if buffersrc_ctx.is_null() {
+            panic!("faield to alloc buffersrc filter");
+        }
+
         let p = &mut *av_buffersrc_parameters_alloc();
 
         p.width = capture_width;
@@ -1869,21 +1869,17 @@ fn video_filter(
         p.time_base.den = 1_000_000_000;
         p.hw_frames_ctx = inctx.as_mut_ptr();
 
-        let sts = av_buffersrc_parameters_set(g.get("in").unwrap().as_mut_ptr(), p as *mut _);
+        let sts = av_buffersrc_parameters_set(buffersrc_ctx, p as *mut _);
         assert_eq!(sts, 0);
-
         av_free(p as *mut _ as *mut _);
+
+        let sts = avfilter_init_dict(buffersrc_ctx, null_mut());
+        assert_eq!(sts, 0);
     }
 
+    // sink
     g.add(&filter::find("buffersink").unwrap(), "out", "")
         .unwrap();
-
-    let mut out = g.get("out").unwrap();
-
-    out.set_pixel_format(match pix_fmt {
-        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-        EncodePixelFormat::Sw(sw) => sw,
-    });
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
