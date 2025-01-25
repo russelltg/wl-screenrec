@@ -12,14 +12,69 @@
                 "args": [
                     "build",
                     "--bin=wl-screenrec",
-                    "--package=wl-screenrec"
+                    "--package=wl-screenrec",
+                    "--features=experimental-vulkan"
                 ],
                 "filter": {
                     "name": "wl-screenrec",
                     "kind": "bin"
+                },
+                "env": {
+                    "FFMPEG_DIR": "/home/russell/ffmpeg/inst"
                 }
             },
-            "args": [],
+            "preRunCommands": [
+                "process handle -p true -s false INT"
+            ],
+            "env": {
+                "RUST_BACKTRACE": "full",
+                "LD_LIBRARY_PATH": "/home/russell/ffmpeg/inst/lib",
+                "VK_ICD_FILENAMES": "/home/russell/mesa/build/src/intel/vulkan/intel_devenv_icd.x86_64.json",
+                "ANV_VIDEO_ENCODE": "1",
+            },
+            "args": [
+                "--experimental-vulkan",
+                "--codec=avc",
+                "-vvv",
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'wl-screenrec' (WAYLAND-2)",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=wl-screenrec",
+                    "--package=wl-screenrec",
+                    "--features=experimental-vulkan"
+                ],
+                "filter": {
+                    "name": "wl-screenrec",
+                    "kind": "bin"
+                },
+                "env": {
+                    "FFMPEG_DIR": "/home/russell/ffmpeg/inst"
+                }
+            },
+            "env": {
+                "WAYLAND_DISPLAY": "wayland-2",
+                "RUST_BACKTRACE": "full",
+                "LD_LIBRARY_PATH": "/home/russell/ffmpeg/inst/lib",
+                "VK_ICD_FILENAMES": "/home/russell/mesa/build/src/intel/vulkan/intel_devenv_icd.x86_64.json",
+                "ANV_VIDEO_ENCODE": "1",
+            },
+            "preRunCommands": [
+                "process handle -p true -s false INT"
+            ],
+            "args": [
+                "--experimental-ext-image-copy-capture", 
+                "--gop-size=1",
+                "--experimental-vulkan",
+                "--codec=avc", 
+                "-vvv",
+            ],
             "cwd": "${workspaceFolder}"
         },
         {
@@ -40,6 +95,12 @@
             },
             "args": [],
             "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "name": "sway",
+            "request": "launch",
+            "program": "/home/russell/sway/build_extimg/sway/sway",
         }
     ]
 }
