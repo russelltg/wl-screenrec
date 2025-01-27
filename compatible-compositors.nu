@@ -1,5 +1,15 @@
 #!/usr/bin/env nu
 
+if "query" not-in (plugin list).name {
+	# `nu_plugin_query` is an official plugin distibuted as part of nushell.
+	# It should be installed in the same folder as the `nu` binary, and therefore
+	# also be in path
+	plugin add $"($nu.current-exe | path dirname)/nu_plugin_query"
+	# plugin add (which nu_plugin_query).path
+}
+
+plugin use query
+
 let protocols = [[name, url];
 	["linux-dmabuf-v1" "https://wayland.app/protocols/linux-dmabuf-v1"]
 	["wlr-screencopy-unstable-v1" "https://wayland.app/protocols/wlr-screencopy-unstable-v1"]
@@ -17,6 +27,7 @@ let known_compositors = {
 	Mir: "https://github.com/canonical/mir"
 	GameScope: "https://github.com/ValveSoftware/gamescope"
 	Jay: "https://github.com/mahkoh/jay"
+	Labwc: "https://labwc.github.io/"
 	Treeland: "https://github.com/linuxdeepin/treeland"
 }
 
@@ -34,13 +45,21 @@ $protocols | par-each {|protocol|
 
 	$compositors | merge ($supported | wrap $protocol.name)
 }
-| reduce {|it, acc| $it | join $acc compositor } | reject version_ | reject version_
+| reduce {|it, acc| $it | join $acc compositor } | reject version_ | reject version_ # Unclear to me why these `version_` columns are added by `join`
 | insert supported {|row|
-	$protocols.name | each { |protocol| $row | get $protocol } | all { $in }
+	$protocols.name | each { |protocol| $row | get $protocol } | all { |supported| $supported == true }
 }
 | where supported
 | select compositor version
 | sort-by compositor --ignore-case
-| update compositor { |row| $"[($row.compositor)]\(($known_compositors | get $row.compositor )\)" }
+| update compositor { |row|
+	let url = try { $known_compositors | get $row.compositor }
+	if $url == null {
+		error make {msg: $"Unkown compositor ($row.compositor). Wayland Explorer probably got updated with a new compositor. Add it to \$known_compositors in this script (path self)"}
+		$"($row.compositor)"
+	} else {
+		$"[($row.compositor)]\(($url)\)"
+	}
+}
 | update version { $"`($in)`" }
 | to md --pretty
