@@ -19,7 +19,9 @@ Open an issue if something is not working, I'm happy to take a look.
    [Sway](https://swaywm.org/), [Hyprland](https://hyprland.org/), and [Wayfire](https://wayfire.org/) all meet this criteria.
 * [`vaapi`](https://01.org/temp-linuxgraphics/community/vaapi) encode support, consult your distribution for how to set this up. Known good configurations:
   * Intel iGPUs
-  * Radeon GPUs
+  * Radeon GPUs[^1]
+
+[^1]: Mesa vaapi (which Radeon GPUs use) does not support transform, so `wl-screenrec` will not work if you have a monitor that has transform applied to it
 
 # Performance
 
