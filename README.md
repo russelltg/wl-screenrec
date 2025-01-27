@@ -20,7 +20,8 @@ Open an issue if something is not working, I'm happy to take a look.
     | compositor                                          | version  |
     | --------------------------------------------------- | -------- |
     | [Hyprland](https://hyprland.org/)                   | `0.42.0` |
-    | [Jay](https://github.com/mahkoh/jay)                | `1.7.0`  |
+    | [Jay](https://github.com/mahkoh/jay)                | `1.9.0`  |
+    | [Labwc](https://labwc.github.io/)                   | `0.8.2`  |
     | [Mir](https://github.com/canonical/mir)             | `2.19`   |
     | [niri](https://github.com/YaLTeR/niri)              | `25.01`  |
     | [Sway](https://swaywm.org/)                         | `1.10`   |
