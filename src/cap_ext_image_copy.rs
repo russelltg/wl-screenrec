@@ -5,11 +5,10 @@ use drm::{buffer::DrmFourcc, node::DrmNode};
 use libc::dev_t;
 use log::{debug, warn};
 use log_once::warn_once;
-use wayland_client::{
-    Dispatch, Proxy, QueueHandle, globals::GlobalList, protocol::wl_output::WlOutput,
-};
+use wayland_client::{Dispatch, Proxy, QueueHandle, globals::GlobalList};
 use wayland_protocols::ext::{
     image_capture_source::v1::client::{
+        ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,
         ext_image_capture_source_v1::ExtImageCaptureSourceV1,
         ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     },
@@ -20,7 +19,7 @@ use wayland_protocols::ext::{
     },
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
+use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State, WhatToCapture};
 
 impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for State<CapExtImageCopy> {
     fn event(
@@ -45,6 +44,18 @@ impl Dispatch<ExtOutputImageCaptureSourceManagerV1, ()> for State<CapExtImageCop
     ) {
     }
 }
+impl Dispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ()> for State<CapExtImageCopy> {
+    fn event(
+        _state: &mut Self,
+        _proxy: &ExtForeignToplevelImageCaptureSourceManagerV1,
+        _event: <ExtForeignToplevelImageCaptureSourceManagerV1 as Proxy>::Event,
+        _data: &(),
+        _conn: &wayland_client::Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
 impl Dispatch<ExtImageCaptureSourceV1, ()> for State<CapExtImageCopy> {
     fn event(
         _state: &mut Self,
@@ -176,19 +187,34 @@ impl CaptureSource for CapExtImageCopy {
     fn new(
         gm: &GlobalList,
         eq: &QueueHandle<crate::State<Self>>,
-        output: WlOutput,
+        output: WhatToCapture,
     ) -> anyhow::Result<Self> {
-        let capture_man: ExtOutputImageCaptureSourceManagerV1 = gm
-            .bind(
-                eq,
-                1..=ExtOutputImageCaptureSourceManagerV1::interface().version,
-                (),
+        let capture_src = match output {
+            WhatToCapture::Output(wl_output) => {
+                let capture_man: ExtOutputImageCaptureSourceManagerV1 = gm
+                    .bind(
+                        eq,
+                        1..=ExtOutputImageCaptureSourceManagerV1::interface().version,
+                        (),
             )
             .context(
-                "Your compositor does not support expt-output-image-capture-source-manager-v1",
+                "Your compositor does not support ext-output-image-capture-source-manager-v1",
             )?;
-
-        let capture_src = capture_man.create_source(&output, eq, ());
+                capture_man.create_source(&wl_output, eq, ())
+            }
+            WhatToCapture::Toplevel(ext_foreign_toplevel_handle_v1) => {
+                let capture_man: ExtForeignToplevelImageCaptureSourceManagerV1 = gm
+                    .bind(
+                        eq,
+                        1..=ExtForeignToplevelImageCaptureSourceManagerV1::interface().version,
+                        (),
+            )
+            .context(
+                "Your compositor does not support ext-foreign-toplevel-image-capture-source-manager-v1",
+            )?;
+                capture_man.create_source(&ext_foreign_toplevel_handle_v1, eq, ())
+            }
+        };
 
         let copy_man: ExtImageCopyCaptureManagerV1 = gm
             .bind(
