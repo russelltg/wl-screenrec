@@ -18,12 +18,16 @@ use crate::{
     transform::{Rect, transpose_if_transform_transposed},
 };
 
+pub enum CropScale {
+    Full,
+    RectScale(Rect, (i32, i32)), // rect is roi in screen coordinates, (i32, i32) is encode resolution. Will be scaled if different size than the rect0.
+}
+
 pub fn video_filter(
     inctx: &mut AvHwFrameCtx,
     pix_fmt: EncodePixelFormat,
     (capture_width, capture_height): (i32, i32),
-    roi_screen_coord: Rect,                               // size (pixels)
-    (enc_w_screen_coord, enc_h_screen_coord): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled.
+    crop_scale: CropScale,
     transform: Transform,
     vulkan: bool,
 ) -> (ffmpeg::filter::Graph, Rational) {
@@ -91,43 +95,63 @@ pub fn video_filter(
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
     // after the format conversion
     // which means we have to transform the crop to be in the *pre* transpose space
-    let scale_filter = scale_filterelem(
-        enc_w_screen_coord,
-        enc_h_screen_coord,
-        transform,
-        pix_fmt,
-        vulkan,
-    );
+    let (crop, (enc_w, enc_h)) = match crop_scale {
+        CropScale::Full => ("".to_string(), (capture_width, capture_height)),
+        CropScale::RectScale(roi_screen_coord, (enc_w_screen_coord, enc_h_screen_coord)) => {
+            let Rect {
+                x: roi_x,
+                y: roi_y,
+                w: roi_w,
+                h: roi_h,
+            } = roi_screen_coord.screen_to_frame(capture_width, capture_height, transform);
+
+            // sanity check
+            assert!(roi_x >= 0, "{roi_x} < 0");
+            assert!(roi_y >= 0, "{roi_y} < 0");
+
+            // exact=1 should not be necessary, as the input is not chroma-subsampled
+            // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
+            // it is harmless to add though, so keep it as a workaround
+            (
+                format!("crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1"),
+                transpose_if_transform_transposed(
+                    (enc_w_screen_coord, enc_h_screen_coord),
+                    transform,
+                ),
+            )
+        }
+    };
+
+    let scale_filter = scale_filterelem(enc_w, enc_h, transform, pix_fmt, vulkan);
     let transpose_filter = transform_filterelem(transform, vulkan);
 
-    let Rect {
-        x: roi_x,
-        y: roi_y,
-        w: roi_w,
-        h: roi_h,
-    } = roi_screen_coord.screen_to_frame(capture_width, capture_height, transform);
+    let hwdownload_filter = match pix_fmt {
+        EncodePixelFormat::Sw(_) => "hwdownload",
+        _ => "",
+    };
 
-    // sanity check
-    assert!(roi_x >= 0, "{roi_x} < 0");
-    assert!(roi_y >= 0, "{roi_y} < 0");
-
-    // exact=1 should not be necessary, as the input is not chroma-subsampled
-    // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
-    // it is harmless to add though, so keep it as a workaround
-    let filtergraph = format!(
-        "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1{scale_filter}{transpose_filter}{}",
-        if let EncodePixelFormat::Sw(_) = pix_fmt {
-            ",hwdownload"
-        } else {
-            ""
-        },
-    );
+    let filtergraph = {
+        let mut filtergraph = String::new();
+        for elem in [&crop, &scale_filter, &transpose_filter, hwdownload_filter] {
+            if elem.is_empty() {
+                continue;
+            }
+            if !filtergraph.is_empty() {
+                filtergraph.push(',');
+            }
+            filtergraph.push_str(elem);
+        }
+        filtergraph
+    };
 
     g.output("in", 0)
         .unwrap()
         .input("out", 0)
         .unwrap()
         .parse(&filtergraph)
+        .map_err(|e| {
+            panic!("failed to parse filter graph `{filtergraph}`: {}", e);
+        })
         .unwrap();
 
     info!("{}", g.dump());
@@ -154,9 +178,9 @@ fn scale_filterelem(
     });
 
     if vulkan {
-        format!(",scale_vulkan=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
+        format!("scale_vulkan=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
     } else {
-        format!(",scale_vaapi=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
+        format!("scale_vaapi=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
     }
 }
 
@@ -174,9 +198,9 @@ fn transform_filterelem(transform: Transform, vulkan: bool) -> String {
     transpose_dir
         .map(|transpose_dir| {
             if vulkan {
-                format!(",transpose_vulkan=dir={transpose_dir}")
+                format!("transpose_vulkan=dir={transpose_dir}")
             } else {
-                format!(",transpose_vaapi=dir={transpose_dir}")
+                format!("transpose_vaapi=dir={transpose_dir}")
             }
         })
         .unwrap_or_default()
