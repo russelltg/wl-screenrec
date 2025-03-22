@@ -12,7 +12,7 @@ Open an issue if something is not working, I'm happy to take a look.
 # System Requirements
 
 * wayland compositor supporting the following protocols:
-  * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1)
+  * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) OR [`ext-image-copy-capture-v1`](https://wayland.app/protocols/ext-image-copy-capture-v1) (*experimental*, use `--experimental-ext-image-copy-capture`)
   * [`linux-dmabuf-v1`](https://wayland.app/protocols/linux-dmabuf-v1)
   * [`xdg-output-unstable-v1`](https://wayland.app/protocols/xdg-output-unstable-v1)
 
@@ -134,7 +134,6 @@ wl-screenrec --ffmpeg-muxer v4l2 -f /dev/video6
 # All options
 
 ```text
-$ wl-screenrec --help
 High performance screen/audio recorder for wlroots
 
 Usage: wl-screenrec [OPTIONS]
@@ -167,7 +166,7 @@ Options:
       --audio-codec <AUDIO_CODEC>
           Which audio codec to use. Ignored if `--ffmpeg-audio-encoder` is supplied [default: auto] [possible values: auto, aac, mp3, flac, opus]
       --audio-bitrate <AUDIO_BITRATE>
-          audio bitrate to encode at. Unit is bytes per second, 16 KB is 128 kbps [default: "16 kB"]
+          audio bitrate to encode at. Unit is bytes per second, 16 kB is 128 kbps
       --ffmpeg-audio-encoder <FFMPEG_AUDIO_ENCODER>
           Use this to force a particular audio ffmpeg encoder. By default, this is guessed from the muxer (which is guess by the file extension if --ffmpeg-muxer isn't passed)
       --encode-pixfmt <ENCODE_PIXFMT>
