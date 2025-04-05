@@ -102,6 +102,9 @@ pub struct Args {
     #[clap(long="no-hw", default_value = "true", action=ArgAction::SetFalse, help="don't use the GPU encoder, download the frames onto the CPU and use a software encoder. Ignored if `encoder` is supplied")]
     hw: bool,
 
+    #[clap(long="no-cursor", default_value = "true", action=ArgAction::SetFalse, help="don't capture the cursor")]
+    cap_cursor: bool,
+
     #[clap(
         long,
         short,
