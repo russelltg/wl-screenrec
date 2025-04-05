@@ -141,6 +141,8 @@ Usage: wl-screenrec [OPTIONS]
 Options:
       --no-hw
           don't use the GPU encoder, download the frames onto the CPU and use a software encoder. Ignored if `encoder` is supplied
+      --no-cursor
+          don't capture the cursor
   -f, --filename <FILENAME>
           filename to write to. container type is detected from extension [default: screenrecord.mp4]
   -g, --geometry <GEOMETRY>
