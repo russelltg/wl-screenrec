@@ -98,7 +98,7 @@ impl Dispatch<ZwpLinuxDmabufFeedbackV1, ()> for State<CapWlrScreencopy> {
                 .node_with_type(drm::node::NodeType::Render)
                 .unwrap()
                 .unwrap();
-
+            state.enc.unwrap_cap().cap_cursor = state.args.cap_cursor;
             let path = node.dev_path().unwrap();
             state.enc.unwrap_cap().drm_device = Some(path);
         }
@@ -109,6 +109,7 @@ pub struct CapWlrScreencopy {
     screencopy_manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
     drm_device: Option<PathBuf>,
+    cap_cursor: bool,
 }
 impl CaptureSource for CapWlrScreencopy {
     fn new(
@@ -128,6 +129,7 @@ impl CaptureSource for CapWlrScreencopy {
             screencopy_manager: man,
             output,
             drm_device: None,
+            cap_cursor: false,
         })
     }
 
@@ -142,9 +144,9 @@ impl CaptureSource for CapWlrScreencopy {
     fn alloc_frame(&self, eq: &QueueHandle<State<Self>>) -> Option<Self::Frame> {
         // creating this triggers the linux_dmabuf event, which is where we allocate etc
 
-        let _capture = self
-            .screencopy_manager
-            .capture_output(1, &self.output, eq, ());
+        let _capture =
+            self.screencopy_manager
+                .capture_output(self.cap_cursor.into(), &self.output, eq, ());
 
         None
     }
