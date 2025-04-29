@@ -960,20 +960,27 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let (desc, av_mapping) = map_drm(&av_surface);
 
-        let modifier = desc.objects[0].format_modifier.to_be_bytes();
-        let stride = desc.layers[0].planes[0].pitch as u32;
-        let fd = unsafe { BorrowedFd::borrow_raw(desc.objects[0].fd) };
+        assert_eq!(desc.nb_layers, 1);
+
 
         let wl_buffer_params = self.dma.create_params(qhandle, ());
-        wl_buffer_params.add(
-            fd,
-            0,
-            0,
-            stride,
-            u32::from_be_bytes(modifier[..4].try_into().unwrap()),
-            u32::from_be_bytes(modifier[4..].try_into().unwrap()),
-        );
 
+        for i in 0..desc.layers[0].nb_planes {
+            let oid = desc.layers[0].planes[i as usize].object_index;
+            assert!(oid < desc.nb_objects);
+            let object = &desc.objects[oid as usize];
+            let plane = &desc.layers[0].planes[i as usize];
+            let modifier = object.format_modifier.to_be_bytes();
+            let fd = unsafe { BorrowedFd::borrow_raw(object.fd) };
+            wl_buffer_params.add(
+                fd,
+                i as u32,
+                plane.offset as u32,
+                plane.pitch as u32,
+                u32::from_be_bytes(modifier[..4].try_into().unwrap()),
+                u32::from_be_bytes(modifier[4..].try_into().unwrap()),
+            );
+        }
         let wl_buffer = wl_buffer_params.create_immed(
             enc.selected_format.width,
             enc.selected_format.height,
