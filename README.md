@@ -69,6 +69,18 @@ cargo install wl-screenrec # stable version
 cargo install --git https://github.com/russelltg/wl-screenrec # git version
 ```
 
+## Fedora
+
+To install wl-screenrec on Fedora, it's recommended to [install it from cargo](#from-source-using-cargo).
+Before you do that though, make sure you have the following dependencies installed (you can get them all via DNF):
+
+- `libdrm-devel`
+- `freeglut-devel`
+- `clang`
+
+Also, make sure you install full ffmpeg and codecs for hardware acceleration support 
+via [RPM Fusion](https://rpmfusion.org/Howto/Multimedia).
+
 ## FreeBSD
 
 There is currently an [upstream bug](https://github.com/zmwangx/rust-ffmpeg/pull/152) preventing
