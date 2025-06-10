@@ -134,20 +134,20 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
         _conn: &wayland_client::Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::Event::*;
+        use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::Event;
         match event {
-            Transform { .. } => {} // TODO: use this
-            Damage { .. } => {}    // TODO: maybe this is how you implement damage
-            PresentationTime {
+            Event::Transform { .. } => {}, // TODO: implement dynamic transform
+            Event::Damage { .. } => {}
+            Event::PresentationTime {
                 tv_sec_hi,
                 tv_sec_lo,
                 tv_nsec,
             } => state.enc.unwrap().cap.time = Some((tv_sec_hi, tv_sec_lo, tv_nsec)),
-            Ready => {
+            Event::Ready => {
                 let (hi, lo, n) = state.enc.unwrap().cap.time.take().unwrap();
                 state.on_copy_complete(qhandle, hi, lo, n);
             }
-            Failed { reason } => {
+            Event::Failed { reason } => {
                 debug!("frame copy failed: {reason:?}");
                 state.on_copy_fail(qhandle);
             }
