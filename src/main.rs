@@ -36,6 +36,7 @@ use ffmpeg::{
     frame::{self, video},
     media, Packet, Rational,
 };
+use fps_limit::FpsLimit;
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use libc::{EXIT_FAILURE, EXIT_SUCCESS};
 use log::{debug, error, info, trace, warn};
@@ -75,6 +76,7 @@ mod audio;
 mod cap_ext_image_copy;
 mod cap_wlr_screencopy;
 mod fifo;
+mod fps_limit;
 mod transform;
 
 #[cfg(target_os = "linux")]
@@ -120,6 +122,13 @@ pub struct Args {
         default_value = ""
     )]
     output: String,
+
+    #[clap(
+        long,
+        short,
+        help = "limit maximum framerate into the encoder. Note that by default, wl-screenrec only copies frames when the contents have changed, so it can drop below this"
+    )]
+    max_fps: Option<f64>,
 
     #[clap(long, short, default_value = "0", action=ArgAction::Count, help = "add very loud logging. can be specified multiple times")]
     verbose: u8,
@@ -375,7 +384,7 @@ impl FpsCounter {
 
     fn report(&mut self) {
         if Instant::now() > self.next_report {
-            let _ = write!(stdout().lock(), "{} fps\n", self.ct - self.last_ct); // ignore errors, can indicate stdout was closed
+            let _ = writeln!(stdout().lock(), "{} fps", self.ct - self.last_ct); // ignore errors, can indicate stdout was closed
             self.next_report += Self::PER;
             self.last_ct = self.ct;
         }
@@ -557,7 +566,6 @@ struct State<S: CaptureSource> {
     dma: ZwpLinuxDmabufV1,
     enc: EncConstructionStage<S>,
     starting_timestamp: Option<i64>,
-    fps_counter: FpsCounter,
     args: Args,
     errored: bool,
     gm: GlobalList,
@@ -626,6 +634,13 @@ impl<S> EncConstructionStage<S> {
             EncConstructionStage::Complete(e) => e.enc,
             EncConstructionStage::OutputWentAway(e) => e.enc,
             _ => panic!("unwrap on non-complete EncConstructionStage"),
+        }
+    }
+    fn enc_mut(&mut self) -> Option<&mut EncState> {
+        match self {
+            EncConstructionStage::Complete(e) => Some(&mut e.enc),
+            EncConstructionStage::OutputWentAway(e) => Some(&mut e.enc),
+            _ => None,
         }
     }
 
@@ -927,7 +942,6 @@ impl<S: CaptureSource + 'static> State<S> {
                     history_already_triggered: false,
                 }),
                 starting_timestamp: None,
-                fps_counter: FpsCounter::new(),
                 args,
                 errored: false,
                 gm,
@@ -1323,8 +1337,6 @@ impl<S: CaptureSource + 'static> State<S> {
     ) {
         let CompleteState { enc, cap, .. } = self.enc.unwrap();
 
-        self.fps_counter.on_frame();
-
         let mut surf = if let InFlightSurface::CopyQueued {
             av_surface,
             av_mapping,
@@ -1359,7 +1371,7 @@ impl<S: CaptureSource + 'static> State<S> {
             (*surf.as_mut_ptr()).time_base.den = 1_000_000_000;
         }
 
-        enc.push(surf);
+        enc.push_with_fpslimit(surf);
 
         self.queue_alloc_frame(qhandle);
     }
@@ -1534,6 +1546,10 @@ impl<S: CaptureSource + 'static> State<S> {
             self.on_frame_allocd(eq, &f);
         }
     }
+
+    fn fps_counter(&mut self) -> Option<&mut FpsCounter> {
+        self.enc.enc_mut().map(|enc| &mut enc.fps_counter)
+    }
 }
 
 struct EncState {
@@ -1553,6 +1569,8 @@ struct EncState {
     transform: Transform,
     enc_video_options: dictionary::Owned<'static>,
     format_change: bool,
+    fps_counter: FpsCounter,
+    fps_limit: Option<FpsLimit<frame::Video>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1654,7 +1672,7 @@ fn get_encoder(args: &Args, format: &Output) -> anyhow::Result<ffmpeg::Codec> {
     Ok(if let Some(encoder_name) = &args.ffmpeg_encoder {
         ffmpeg_next::encoder::find_by_name(encoder_name).ok_or_else(|| {
             format_err!(
-                "Encoder {encoder_name} specified with --ffmpeg-encoder could not be instntiated"
+                "Encoder {encoder_name} specified with --ffmpeg-encoder could not be instantiated"
             )
         })?
     } else {
@@ -1938,6 +1956,8 @@ impl EncState {
             audio,
             selected_format: capture_format,
             format_change: false,
+            fps_counter: FpsCounter::new(),
+            fps_limit: args.max_fps.map(FpsLimit::new),
         })
     }
 
@@ -2069,6 +2089,12 @@ impl EncState {
     }
 
     fn flush(&mut self) {
+        if let Some(limit) = &mut self.fps_limit {
+            if let Some(f) = limit.flush() {
+                self.push(f);
+            }
+        }
+
         self.flush_audio();
         self.video_filter
             .get("in")
@@ -2083,6 +2109,7 @@ impl EncState {
     }
 
     fn push(&mut self, surf: frame::Video) {
+        self.fps_counter.on_frame();
         self.video_filter
             .get("in")
             .unwrap()
@@ -2091,6 +2118,17 @@ impl EncState {
             .unwrap();
 
         self.process_ready();
+    }
+
+    fn push_with_fpslimit(&mut self, surf: frame::Video) {
+        if let Some(limit) = &mut self.fps_limit {
+            let ts = Duration::from_nanos(surf.pts().unwrap() as u64);
+            if let Some(to_enc) = limit.on_new_frame(surf, ts) {
+                self.push(to_enc);
+            }
+        } else {
+            self.push(surf);
+        }
     }
 
     fn trigger_history(&mut self) {
@@ -2345,6 +2383,12 @@ fn main() {
         error!("`--encode-pixfmt vaapi` passed, this is nonsense. It will automatically be transformed into a vaapi pixel format if the selected encoder supports vaapi memory input");
         exit(1);
     }
+    if let Some(max_fps) = args.max_fps {
+        if max_fps <= 0. {
+            error!("`--max-fps` must be a positive and nonzero number");
+            exit(1);
+        }
+    }
 
     let conn = match Connection::connect_to_env() {
         Ok(conn) => conn,
@@ -2432,7 +2476,7 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
 
         match poll.poll(
             &mut events,
-            Some(state.fps_counter.time_until_next_report()),
+            state.fps_counter().map(|f| f.time_until_next_report()),
         ) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 continue 'outer;
@@ -2464,7 +2508,9 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
             }
         }
 
-        state.fps_counter.report();
+        if let Some(f) = state.fps_counter() {
+            f.report();
+        }
 
         if state.errored {
             break EXIT_FAILURE;

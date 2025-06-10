@@ -161,6 +161,8 @@ Options:
           geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output
   -o, --output <OUTPUT>
           Which output (display) to record. Mutually exclusive with --geometry. Defaults to your only display if you only have one [default: ]
+  -m, --max-fps <MAX_FPS>
+          limit maximum framerate into the encoder. Note that by default, wl-screenrec only copies frames when the contents have changed, so it can drop below this
   -v, --verbose...
           add very loud logging. can be specified multiple times
       --dri-device <DRI_DEVICE>
