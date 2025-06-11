@@ -203,8 +203,8 @@ Options:
           GOP (group of pictures) size
       --generate-completions <COMPLETIONS_GENERATOR>
           print completions for the specified shell to stdout [possible values: bash, elvish, fish, powershell, zsh]
-      --experimental-ext-image-copy-capture
-          use the new ext-image-copy-capture protocol
+      --capture-backend <CAPTURE_BACKEND>
+          which capture backend to use [default: auto] [possible values: auto, wlr-screencopy, ext-image-copy-capture]
   -h, --help
           Print help
   -V, --version
