@@ -12,7 +12,7 @@ Open an issue if something is not working, I'm happy to take a look.
 # System Requirements
 
 * wayland compositor supporting the following protocols:
-  * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) OR [`ext-image-copy-capture-v1`](https://wayland.app/protocols/ext-image-copy-capture-v1) (*experimental*, use `--experimental-ext-image-copy-capture`)
+  * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) OR [`ext-image-copy-capture-v1`](https://wayland.app/protocols/ext-image-copy-capture-v1)
   * [`linux-dmabuf-v1`](https://wayland.app/protocols/linux-dmabuf-v1)
   * [`xdg-output-unstable-v1`](https://wayland.app/protocols/xdg-output-unstable-v1)
 
