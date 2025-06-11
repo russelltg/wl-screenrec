@@ -52,6 +52,7 @@ use thiserror::Error;
 use transform::{transpose_if_transform_transposed, Rect};
 use wayland_client::{
     backend::ObjectId,
+    event_created_child,
     globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
     protocol::{
         wl_buffer::WlBuffer,
@@ -61,6 +62,10 @@ use wayland_client::{
     ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
+    ext::foreign_toplevel_list::v1::client::{
+        ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+        ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+    },
     wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
         zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -113,16 +118,27 @@ pub struct Args {
     )]
     filename: String,
 
-    #[clap(long, short, value_parser=parse_geometry, help="geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output", allow_hyphen_values=true)]
+    #[clap(
+        long, 
+        short, 
+        value_parser=parse_geometry, 
+        help="geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output", 
+        allow_hyphen_values=true,
+        conflicts_with = "toplevel",
+    )]
     geometry: Option<(i32, i32, u32, u32)>,
 
     #[clap(
         long,
         short,
         help = "Which output (display) to record. Mutually exclusive with --geometry. Defaults to your only display if you only have one",
-        default_value = ""
+        default_value = "",
+        conflicts_with = "toplevel",
     )]
     output: String,
+
+    #[clap(long, help = "which toplevel to capture", default_value = "", conflicts_with_all(["output", "geometry"]))]
+    toplevel: String,
 
     #[clap(long, short, default_value = "0", action=ArgAction::Count, help = "add very loud logging. can be specified multiple times")]
     verbose: u8,
@@ -238,13 +254,18 @@ pub struct Args {
     ext_image_copy_capture: bool,
 }
 
+enum WhatToCapture {
+    Output(WlOutput),
+    Toplevel(ExtForeignToplevelHandleV1),
+}
+
 trait CaptureSource: Sized {
     type Frame: Clone;
 
     fn new(
         gm: &GlobalList,
         eq: &QueueHandle<State<Self>>,
-        output: WlOutput,
+        output: WhatToCapture,
     ) -> anyhow::Result<Self>;
 
     // allocates a frame, either sync or async
@@ -544,6 +565,7 @@ struct State<S: CaptureSource> {
     sigusr1_flag: Arc<AtomicBool>,
     gm: GlobalList,
     xdg_output_manager: ZxdgOutputManagerV1,
+    toplevels: Vec<(String, ExtForeignToplevelHandleV1)>, // (name, _)
 }
 
 enum InFlightSurface<S: CaptureSource> {
@@ -828,6 +850,58 @@ impl<S: CaptureSource> Dispatch<WlRegistry, ()> for State<S> {
     }
 }
 
+impl<S: CaptureSource> Dispatch<ExtForeignToplevelHandleV1, ()> for State<S> {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelHandleV1,
+        event: <ExtForeignToplevelHandleV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_handle_v1::Event::Closed => {}
+            ext_foreign_toplevel_handle_v1::Event::Done => {}
+            ext_foreign_toplevel_handle_v1::Event::Title { .. } => {}
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id  } => {
+                state.toplevels.push((app_id, proxy.clone()));
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { .. } => {
+            }
+            _ => todo!(),
+        }
+    }
+}
+
+impl<S: CaptureSource + 'static> Dispatch<ExtForeignToplevelListV1, ()> for State<S> {
+    fn event(
+        state: &mut Self,
+        proxy: &ExtForeignToplevelListV1,
+        event: <ExtForeignToplevelListV1 as Proxy>::Event,
+        data: &(),
+        conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } => {}
+            ext_foreign_toplevel_list_v1::Event::Finished => {}
+            _ => todo!(),
+        }
+    }
+
+    event_created_child!(State<S>, ExtForeignToplevelListV1, [
+        // there can be multiple lines if this interface has multiple object-creating event
+        EVT_CREATE_BAR => (ExtForeignToplevelHandleV1, ()),
+    //  ~~~~~~~~~~~~~~     ~~~~~  ~~~~~~~~~~~~~~~~~~
+    //    |                  |      |
+    //    |                  |      +-- an expression whose evaluation produces the
+    //    |                  |          user data value
+    //    |                  +-- the type of the newly created object
+    //    +-- the opcode of the event that creates a new object, constants for those are
+    //        generated alongside the `WlFoo` type in the `wl_foo` module
+    ]);
+}
+
 fn dmabuf_to_av(dmabuf: DrmFourcc) -> Pixel {
     match dmabuf {
         DrmFourcc::Xrgb8888 => Pixel::BGRZ,
@@ -857,6 +931,9 @@ impl<S: CaptureSource + 'static> State<S> {
         let xdg_output_manager: ZxdgOutputManagerV1 = gm
             .bind(&eq, 3..=ZxdgOutputManagerV1::interface().version, ())
             .context("your compositor does not support zxdg-output-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
+
+        let _toplevel: Result<ExtForeignToplevelListV1, _> =
+            gm.bind(&eq, 1..=ExtForeignToplevelListV1::interface().version, ());
 
         let mut partial_outputs = HashMap::new();
         for g in gm.contents().clone_list() {
@@ -900,6 +977,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 sigusr1_flag,
                 gm,
                 xdg_output_manager,
+                toplevels: Vec::new(),
             },
             queue,
         ))
@@ -1151,7 +1229,12 @@ impl<S: CaptureSource + 'static> State<S> {
                         );
                         let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate)
                             .take_enc();
-                        let cap = S::new(&self.gm, qhandle, info.output.clone()).unwrap();
+                        let cap = S::new(
+                            &self.gm,
+                            qhandle,
+                            WhatToCapture::Output(info.output.clone()),
+                        )
+                        .unwrap();
                         self.enc = EncConstructionStage::Complete(CompleteState {
                             enc,
                             cap,
@@ -1253,7 +1336,21 @@ impl<S: CaptureSource + 'static> State<S> {
 
         info!("Using output {}", output.name);
 
-        let cap = match S::new(&self.gm, qhandle, output.output.clone()) {
+        dbg!(&self.toplevels);
+
+        let cap = match S::new(
+            &self.gm,
+            qhandle,
+            // WhatToCapture::Output(output.output.clone())
+            WhatToCapture::Toplevel(
+                self.toplevels
+                    .iter()
+                    .find(|(name, _)| name == "Alacritty")
+                    .unwrap()
+                    .1
+                    .clone(),
+            ),
+        ) {
             Ok(cap) => cap,
             Err(err) => {
                 eprintln!("failed to create capture state: {}", err);
