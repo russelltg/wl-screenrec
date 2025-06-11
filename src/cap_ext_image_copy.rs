@@ -136,7 +136,7 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
     ) {
         use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_capture_frame_v1::Event;
         match event {
-            Event::Transform { .. } => {}, // TODO: implement dynamic transform
+            Event::Transform { .. } => {} // TODO: implement dynamic transform
             Event::Damage { .. } => {}
             Event::PresentationTime {
                 tv_sec_hi,

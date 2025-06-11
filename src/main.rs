@@ -61,6 +61,7 @@ use wayland_client::{
     ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
+    ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
         zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -70,6 +71,7 @@ use wayland_protocols::{
         zxdg_output_v1::{self, ZxdgOutputV1},
     },
 };
+use wayland_protocols_wlr::screencopy::v1::client::zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1;
 
 mod avhw;
 use avhw::{AvHwDevCtx, AvHwFrameCtx};
@@ -231,11 +233,12 @@ pub struct Args {
     completions_generator: Option<clap_complete::Shell>,
 
     #[clap(
-        long = "experimental-ext-image-copy-capture",
-        help = "use the new ext-image-copy-capture protocol",
-        default_value = "false"
+        long = "capture-backend",
+        help = "which capture backend to use",
+        value_enum,
+        default_value_t
     )]
-    ext_image_copy_capture: bool,
+    capture_backend: CaptureBackend,
 }
 
 trait CaptureSource: Sized {
@@ -337,6 +340,14 @@ fn parse_size(size: &str) -> Result<(u32, u32), ParseGeometryError> {
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
     let seconds = arg.parse()?;
     Ok(std::time::Duration::from_secs(seconds))
+}
+
+#[derive(clap::ValueEnum, Debug, Default, Clone, PartialEq, Eq)]
+enum CaptureBackend {
+    #[default]
+    Auto,
+    WlrScreencopy,
+    ExtImageCopyCapture,
 }
 
 struct FpsCounter {
@@ -2176,30 +2187,21 @@ fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
     }
 }
 
-fn main() {
-    let args = Args::parse();
-    if args.ext_image_copy_capture {
-        execute::<CapExtImageCopy>(args);
-    } else {
-        execute::<CapWlrScreencopy>(args);
+struct InitialProbeState;
+impl Dispatch<WlRegistry, GlobalListContents> for InitialProbeState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlRegistry,
+        _event: <WlRegistry as Proxy>::Event,
+        _data: &GlobalListContents,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
     }
 }
 
-fn execute<S: CaptureSource + 'static>(args: Args) {
-    if let Some(generator) = args.completions_generator {
-        let mut command = Args::command();
-        let bin_name = command.get_name().to_string();
-        clap_complete::generate(generator, &mut command, bin_name, &mut io::stdout());
-        return;
-    }
-
-    let quit_flag = Arc::new(AtomicUsize::new(usize::MAX)); // ::MAX means still running, otherwise it's an exit value
-    let sigusr1_flag = Arc::new(AtomicBool::new(false));
-
-    signal_hook::flag::register_usize(SIGINT, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
+fn main() {
+    let args = Args::parse();
 
     CombinedLogger::init(vec![TermLogger::new(
         match args.verbose {
@@ -2213,6 +2215,13 @@ fn execute<S: CaptureSource + 'static>(args: Args) {
         ColorChoice::Auto,
     )])
     .unwrap();
+
+    if let Some(generator) = args.completions_generator {
+        let mut command = Args::command();
+        let bin_name = command.get_name().to_string();
+        clap_complete::generate(generator, &mut command, bin_name, &mut io::stdout());
+        return;
+    }
 
     if !args.audio && args.audio_backend != DEFAULT_AUDIO_BACKEND {
         warn!("--audio-backend passed without --audio, will be ignored");
@@ -2237,23 +2246,61 @@ fn execute<S: CaptureSource + 'static>(args: Args) {
         exit(1);
     }
 
+    let conn = match Connection::connect_to_env() {
+        Ok(conn) => conn,
+        Err(e @ ConnectError::NoCompositor) => {
+            error!("WAYLAND_DISPLAY or XDG_RUNTIME_DIR environment variables are not set or are set to an invalid value: {e}");
+            exit(1);
+        }
+        Err(e) => {
+            error!("{e}");
+            exit(1)
+        }
+    };
+
+    match args.capture_backend {
+        CaptureBackend::Auto => {
+            let (gm, _queue) = registry_queue_init::<InitialProbeState>(&conn).unwrap();
+            let ext_image_copy_cap_name = ExtOutputImageCaptureSourceManagerV1::interface().name;
+            let has_ext_image_copy_cap = gm.contents().with_list(|l| {
+                l.iter()
+                    .find(|g| g.interface == ext_image_copy_cap_name)
+                    .is_some()
+            });
+            if has_ext_image_copy_cap {
+                info!("Protocol {ext_image_copy_cap_name} found in globals, defaulting to it (use `--capture-backend` to override)");
+                execute::<CapExtImageCopy>(args, conn);
+            } else {
+                info!(
+                    "Protocol {ext_image_copy_cap_name} not found in globals, defaulting to {} (use `--capture-backend` to override)",
+                    ZwlrScreencopyManagerV1::interface().name
+                );
+                execute::<CapWlrScreencopy>(args, conn);
+            }
+        }
+        CaptureBackend::WlrScreencopy => {
+            execute::<CapWlrScreencopy>(args, conn);
+        }
+        CaptureBackend::ExtImageCopyCapture => {
+            execute::<CapExtImageCopy>(args, conn);
+        }
+    }
+}
+
+fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
+    let quit_flag = Arc::new(AtomicUsize::new(usize::MAX)); // ::MAX means still running, otherwise it's an exit value
+    let sigusr1_flag = Arc::new(AtomicBool::new(false));
+
+    signal_hook::flag::register_usize(SIGINT, Arc::clone(&quit_flag), 0).unwrap();
+    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 0).unwrap();
+    signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
+    signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
+
     ffmpeg_next::init().unwrap();
 
     if args.verbose >= 3 {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
     }
-
-    let conn = match Connection::connect_to_env() {
-        Ok(conn) => conn,
-        Err(e @ ConnectError::NoCompositor) => {
-            eprintln!("WAYLAND_DISPLAY or XDG_RUNTIME_DIR environment variables are not set or are set to an invalid value: {e}");
-            exit(1);
-        }
-        Err(e) => {
-            eprintln!("{e}");
-            exit(1)
-        }
-    };
 
     let (mut state, mut queue) = match State::<S>::new(&conn, args, quit_flag.clone(), sigusr1_flag)
     {
