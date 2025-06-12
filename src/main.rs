@@ -2262,11 +2262,9 @@ fn main() {
         CaptureBackend::Auto => {
             let (gm, _queue) = registry_queue_init::<InitialProbeState>(&conn).unwrap();
             let ext_image_copy_cap_name = ExtOutputImageCaptureSourceManagerV1::interface().name;
-            let has_ext_image_copy_cap = gm.contents().with_list(|l| {
-                l.iter()
-                    .find(|g| g.interface == ext_image_copy_cap_name)
-                    .is_some()
-            });
+            let has_ext_image_copy_cap = gm
+                .contents()
+                .with_list(|l| l.iter().any(|g| g.interface == ext_image_copy_cap_name));
             if has_ext_image_copy_cap {
                 info!("Protocol {ext_image_copy_cap_name} found in globals, defaulting to it (use `--capture-backend` to override)");
                 execute::<CapExtImageCopy>(args, conn);
