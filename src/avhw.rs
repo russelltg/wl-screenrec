@@ -156,6 +156,18 @@ impl AvHwDevCtx {
                             },
                             &mut image_format_prop,
                         ) {
+                            if image_format_prop.image_format_properties.max_extent.width
+                                < width as u32
+                                || image_format_prop.image_format_properties.max_extent.height
+                                    < height as u32
+                            {
+                                log::debug!(
+                                    "modifier {:?} not supported for size {}x{} (max extents {}x{})",
+                                    modifier, width, height, image_format_prop.image_format_properties.max_extent.width, 
+                                    image_format_prop.image_format_properties.max_extent.height
+                                );
+                                continue; // modifier not supported for this size
+                            }
                             modifiers_filtered.push(*modifier);
                         }
                     }
@@ -198,7 +210,8 @@ impl AvHwDevCtx {
                         }
                     }
 
-                    vk.vk_modifiers = Pin::new(modifiers_filtered.into_boxed_slice()); // NOTE: safe because this can't change the address of the array
+                    // NOTE: safe because this can't change the address of the array
+                    vk.vk_modifiers = Pin::new(modifiers_filtered.into_boxed_slice());
                 }
                 #[cfg(not(feature = "experimental-vulkan"))]
                 panic!("vulkan requested but built without vulkan support")
@@ -238,12 +251,11 @@ impl Drop for AvHwDevCtx {
     }
 }
 
-
 // self-referencing struct of Vulkan buffers
 // 'static in here is a hack, it's really the lifetime of the AvHwDevCtxVulkanBuffers
 #[cfg(feature = "experimental-vulkan")]
 struct AvHwDevCtxVulkanBuffers {
-    drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT<'static>,  // points to _image_fmt_list_info & _vk_modifiers
+    drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT<'static>, // points to _image_fmt_list_info & _vk_modifiers
     vk_modifiers: Pin<Box<[DrmModifier]>>,
     image_fmt_list_info: ash::vk::ImageFormatListCreateInfo<'static>, // points to _image_fmt_list_info_fmts
     image_fmt_list_info_fmts: [ash::vk::Format; 1],
