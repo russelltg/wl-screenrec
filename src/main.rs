@@ -265,7 +265,7 @@ trait CaptureSource: Sized {
 
     // queue a copy of the screen into `buf`
     // call `on_copy_complete` or `on_copy_fail` when the copy has completed
-    fn queue_copy(&self, damage: bool, buf: &WlBuffer, cap: &Self::Frame);
+    fn queue_copy(&self, damage: bool, buf: &WlBuffer, dims: (i32, i32), cap: &Self::Frame);
 
     // destroy the `frame` object
     fn on_done_with_frame(&self, f: Self::Frame);
@@ -990,7 +990,7 @@ impl<S: CaptureSource + 'static> State<S> {
             (),
         );
 
-        cap.queue_copy(self.args.damage, &wl_buffer, frame);
+        cap.queue_copy(self.args.damage, &wl_buffer, (enc.selected_format.width, enc.selected_format.height), frame);
 
         self.in_flight_surface = InFlightSurface::CopyQueued {
             av_surface,
