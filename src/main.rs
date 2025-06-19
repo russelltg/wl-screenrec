@@ -962,7 +962,6 @@ impl<S: CaptureSource + 'static> State<S> {
 
         assert_eq!(desc.nb_layers, 1);
 
-
         let wl_buffer_params = self.dma.create_params(qhandle, ());
 
         for i in 0..desc.layers[0].nb_planes {
@@ -990,7 +989,12 @@ impl<S: CaptureSource + 'static> State<S> {
             (),
         );
 
-        cap.queue_copy(self.args.damage, &wl_buffer, (enc.selected_format.width, enc.selected_format.height), frame);
+        cap.queue_copy(
+            self.args.damage,
+            &wl_buffer,
+            (enc.selected_format.width, enc.selected_format.height),
+            frame,
+        );
 
         self.in_flight_surface = InFlightSurface::CopyQueued {
             av_surface,
@@ -1600,7 +1604,9 @@ fn make_video_params(
         EncodePixelFormat::Sw(sw) => sw,
     });
 
-    if let EncodePixelFormat::Vaapi(sw_pix_fmt) | EncodePixelFormat::Vulkan(sw_pix_fmt) = enc_pix_fmt {
+    if let EncodePixelFormat::Vaapi(sw_pix_fmt) | EncodePixelFormat::Vulkan(sw_pix_fmt) =
+        enc_pix_fmt
+    {
         unsafe {
             (*enc.as_mut_ptr()).hw_device_ctx = av_buffer_ref(hw_device_ctx.as_mut_ptr());
             (*enc.as_mut_ptr()).hw_frames_ctx = av_buffer_ref(frames_yuv.as_mut_ptr());
@@ -1765,8 +1771,10 @@ impl EncState {
             #[allow(unreachable_code)]
             {
                 info!("Opening vulkan device from {}", dri_device.display());
-                AvHwDevCtx::new_vulkan(dri_device)
-                    .map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
+                AvHwDevCtx::new_vulkan(
+                    dri_device, false, /* set to true to enable vulkan validation */
+                )
+                .map_err(|e| anyhow!("Failed to open vulkan device: {e}"))?
             }
         } else {
             info!(
