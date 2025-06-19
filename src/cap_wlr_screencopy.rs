@@ -133,7 +133,7 @@ impl CaptureSource for CapWlrScreencopy {
         })
     }
 
-    fn queue_copy(&self, damage: bool, buf: &WlBuffer, capture: &Self::Frame) {
+    fn queue_copy(&self, damage: bool, buf: &WlBuffer, _dims: (i32, i32), capture: &Self::Frame) {
         if damage {
             capture.copy_with_damage(buf);
         } else {

@@ -218,12 +218,14 @@ impl CaptureSource for CapExtImageCopy {
         &self,
         damage: bool,
         buf: &wayland_client::protocol::wl_buffer::WlBuffer,
+        (width, height): (i32, i32),
         cap: &Self::Frame,
     ) {
         if !damage {
             warn_once!("--no-damage is not implemented in ext-image-capture");
         }
         cap.attach_buffer(buf);
+        cap.damage_buffer(0, 0, width, height);
         cap.capture();
     }
 
