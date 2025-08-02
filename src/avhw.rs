@@ -246,7 +246,7 @@ impl AvHwDevCtx {
                 #[cfg(not(feature = "experimental-vulkan"))]
                 panic!("vulkan requested but built without vulkan support")
             } else {
-                if modifiers != &[DrmModifier::LINEAR] {
+                if !modifiers.contains(&DrmModifier::LINEAR) {
                     error!("unknown how to request non-linear frames in vaapi");
                 }
                 av_hwframe_ctx_init(hwframe)
