@@ -186,12 +186,12 @@ impl AvHwDevCtx {
                             }
 
                             for m in &props_storage {
-                                if m.drm_format_modifier == modifier.0 {
-                                    if m.drm_format_modifier_plane_count > 1 {
-                                        log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
+                                if m.drm_format_modifier == modifier.0
+                                    && m.drm_format_modifier_plane_count > 1
+                                {
+                                    log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
                                             m.drm_format_modifier_plane_count);
-                                        continue 'outer;
-                                    }
+                                    continue 'outer;
                                 }
                             }
 

@@ -95,7 +95,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                         .dmabuf_formats
                         .push(DmabufPotentialFormat { fourcc, modifiers });
                 } else {
-                    warn!("Unknown DRM Fourcc: 0x{:08x}", format)
+                    warn!("Unknown DRM Fourcc: 0x{format:08x}")
                 }
             }
             ext_image_copy_capture_session_v1::Event::Done => {
