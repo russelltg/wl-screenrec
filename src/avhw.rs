@@ -118,7 +118,7 @@ impl AvHwDevCtx {
             let sts = if self.fmt == Pixel::VULKAN {
                 #[cfg(feature = "experimental-vulkan")]
                 {
-                    use ash::vk;
+                    use ash::vk::{self, DrmFormatModifierPropertiesEXT, FormatProperties2};
                     use ffmpeg::ffi::{
                         av_vkfmt_from_pixfmt, AVHWDeviceContext, AVVulkanDeviceContext,
                         AVVulkanFramesContext,
@@ -134,24 +134,42 @@ impl AvHwDevCtx {
                         vk_hwctx.inst,
                     );
 
+                    let mut drm_props = ash::vk::DrmFormatModifierPropertiesListEXT::default();
+                    inst.get_physical_device_format_properties2(
+                        vk_hwctx.phys_dev,
+                        *av_vkfmt_from_pixfmt(pixfmt.into()),
+                        &mut FormatProperties2::default().push_next(&mut drm_props),
+                    );
+                    let mut props_storage = vec![
+                        DrmFormatModifierPropertiesEXT::default();
+                        drm_props.drm_format_modifier_count as usize
+                    ];
+                    drm_props.p_drm_format_modifier_properties = props_storage.as_mut_ptr();
+                    inst.get_physical_device_format_properties2(
+                        vk_hwctx.phys_dev,
+                        *av_vkfmt_from_pixfmt(pixfmt.into()),
+                        &mut FormatProperties2::default().push_next(&mut drm_props),
+                    );
+
                     let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
-                    for modifier in modifiers {
+                    'outer: for modifier in modifiers {
                         let mut drm_info =
                             ash::vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
                                 .drm_format_modifier(modifier.0);
+
                         let mut image_format_prop = ash::vk::ImageFormatProperties2::default();
 
                         if let Ok(()) = inst.get_physical_device_image_format_properties2(
                             vk_hwctx.phys_dev,
-                            &vk::PhysicalDeviceImageFormatInfo2 {
-                                format: *av_vkfmt_from_pixfmt(pixfmt.into()),
-                                usage: vk::ImageUsageFlags::TRANSFER_DST
-                                    | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
-                                    | vk::ImageUsageFlags::SAMPLED,
-                                tiling: vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
-                                p_next: <*mut _>::cast(&mut drm_info),
-                                ..Default::default()
-                            },
+                            &vk::PhysicalDeviceImageFormatInfo2::default()
+                                .format(*av_vkfmt_from_pixfmt(pixfmt.into()))
+                                .usage(
+                                    vk::ImageUsageFlags::TRANSFER_DST
+                                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                                        | vk::ImageUsageFlags::SAMPLED,
+                                )
+                                .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                                .push_next(&mut drm_info),
                             &mut image_format_prop,
                         ) {
                             if image_format_prop.image_format_properties.max_extent.width
@@ -166,6 +184,17 @@ impl AvHwDevCtx {
                                 );
                                 continue; // modifier not supported for this size
                             }
+
+                            for m in &props_storage {
+                                if m.drm_format_modifier == modifier.0 {
+                                    if m.drm_format_modifier_plane_count > 1 {
+                                        log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
+                                            m.drm_format_modifier_plane_count);
+                                        continue 'outer;
+                                    }
+                                }
+                            }
+
                             modifiers_filtered.push(*modifier);
                         }
                     }
