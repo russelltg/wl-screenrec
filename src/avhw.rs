@@ -1,5 +1,5 @@
 #[cfg(feature = "experimental-vulkan")]
-use std::pin::Pin;
+use std::{os::raw::c_void, pin::Pin};
 use std::{ffi::CString, path::Path, ptr::null_mut};
 
 use ffmpeg::{
@@ -199,23 +199,10 @@ impl AvHwDevCtx {
                         }
                     }
 
-                    vk = Some(Pin::new(Box::new(AvHwDevCtxVulkanBuffers {
-                        drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT::default(),
-                        vk_modifiers: Pin::new(Box::new([])),
-                        image_fmt_list_info: ash::vk::ImageFormatListCreateInfo::default(),
-                        image_fmt_list_info_fmts: [*av_vkfmt_from_pixfmt(pixfmt.into())],
-                    })));
-                    let vk = vk.as_mut().unwrap();
-
-                    vk.image_fmt_list_info = ash::vk::ImageFormatListCreateInfo {
-                        view_format_count: vk.image_fmt_list_info_fmts.len() as u32,
-                        p_view_formats: vk.image_fmt_list_info_fmts.as_ptr(),
-                        ..Default::default()
-                    };
-
-                    vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
-                    vk.drm_info.drm_format_modifier_count = modifiers_filtered.len() as u32;
-                    vk.drm_info.p_drm_format_modifiers = modifiers_filtered.as_ptr() as _;
+                    let mut vk_bufs = AvHwDevCtxVulkanBuffers::new(
+                        modifiers_filtered.into_boxed_slice(),
+                        pixfmt,
+                    );
 
                     let vk_ptr = &mut *(hwframe_casted.hwctx as *mut AVVulkanFramesContext);
 
@@ -223,16 +210,10 @@ impl AvHwDevCtx {
                     vk_ptr.usage |= vk::ImageUsageFlags::TRANSFER_DST
                         | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
                         | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
-                    vk_ptr.create_pnext = &mut vk.drm_info
-                        as *mut ash::vk::ImageDrmFormatModifierListCreateInfoEXT
-                        as _;
+                    vk_ptr.create_pnext = vk_bufs.as_mut().chain_ptr();
 
-                    let sts = av_hwframe_ctx_init(hwframe);
-
-                    // NOTE: safe because this can't change the address of the array
-                    vk.vk_modifiers = Pin::new(modifiers_filtered.into_boxed_slice());
-
-                    sts
+                    vk = Some(vk_bufs);
+                    av_hwframe_ctx_init(hwframe)
                 }
                 #[cfg(not(feature = "experimental-vulkan"))]
                 panic!("vulkan requested but built without vulkan support")
@@ -280,6 +261,41 @@ struct AvHwDevCtxVulkanBuffers {
     vk_modifiers: Pin<Box<[DrmModifier]>>,
     image_fmt_list_info: ash::vk::ImageFormatListCreateInfo<'static>, // points to _image_fmt_list_info_fmts
     image_fmt_list_info_fmts: [ash::vk::Format; 1],
+    _pin: std::marker::PhantomPinned, // to make this struct !Unpin
+}
+
+#[cfg(feature = "experimental-vulkan")]
+impl AvHwDevCtxVulkanBuffers {
+    pub fn new(modifiers_filtered: Box<[DrmModifier]>, pixfmt: Pixel) -> Pin<Box<Self>> {
+        use ffmpeg::ffi::av_vkfmt_from_pixfmt;
+
+        let mut vk = Box::pin(AvHwDevCtxVulkanBuffers {
+            drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT::default(),
+            vk_modifiers: Pin::new(modifiers_filtered),
+            image_fmt_list_info: ash::vk::ImageFormatListCreateInfo::default(),
+            image_fmt_list_info_fmts: [unsafe { *av_vkfmt_from_pixfmt(pixfmt.into()) }],
+            _pin: std::marker::PhantomPinned,
+        });
+
+        // SAFETY: we are not moving out of any of the fields, so this is safe
+        // Also, this sets up the self-referencing pointers correctly
+        unsafe {
+            let vk = vk.as_mut().get_unchecked_mut();
+
+            vk.image_fmt_list_info.view_format_count = vk.image_fmt_list_info_fmts.len() as u32;
+            vk.image_fmt_list_info.p_view_formats = vk.image_fmt_list_info_fmts.as_ptr();
+
+            vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
+            vk.drm_info.drm_format_modifier_count = vk.vk_modifiers.len() as u32;
+            vk.drm_info.p_drm_format_modifiers = vk.vk_modifiers.as_ptr() as *const _;
+        }
+        vk
+    }
+
+    pub fn chain_ptr(self: std::pin::Pin<&mut Self>) -> *mut c_void {
+        // drm_info is the beginning of the chain
+        &self.as_ref().drm_info as *const _ as *mut _
+    }
 }
 
 pub struct AvHwFrameCtx {
