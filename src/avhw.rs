@@ -112,12 +112,11 @@ impl AvHwDevCtx {
             hwframe_casted.height = height;
             hwframe_casted.initial_pool_size = 5;
 
-            let mut sts = -1;
 
             #[cfg(feature = "experimental-vulkan")]
             let mut vk: Option<Pin<Box<AvHwDevCtxVulkanBuffers>>> = None;
 
-            if self.fmt == Pixel::VULKAN {
+            let sts = if self.fmt == Pixel::VULKAN {
                 #[cfg(feature = "experimental-vulkan")]
                 {
                     use ash::vk;
@@ -189,6 +188,7 @@ impl AvHwDevCtx {
                     vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
 
                     // some buffer requirements are complex, just start removing modifiers until it works
+                    let mut sts = -1;
                     while sts != 0 && !modifiers_filtered.is_empty() {
                         vk.drm_info.drm_format_modifier_count = modifiers_filtered.len() as u32;
                         vk.drm_info.p_drm_format_modifiers = modifiers_filtered.as_ptr() as _;
@@ -212,6 +212,8 @@ impl AvHwDevCtx {
 
                     // NOTE: safe because this can't change the address of the array
                     vk.vk_modifiers = Pin::new(modifiers_filtered.into_boxed_slice());
+
+                    sts
                 }
                 #[cfg(not(feature = "experimental-vulkan"))]
                 panic!("vulkan requested but built without vulkan support")
@@ -219,8 +221,8 @@ impl AvHwDevCtx {
                 if modifiers != &[DrmModifier::LINEAR] {
                     error!("unknown how to request non-linear frames in vaapi");
                 }
-                sts = av_hwframe_ctx_init(hwframe);
-            }
+                av_hwframe_ctx_init(hwframe)
+            };
             if sts != 0 {
                 return Err(ffmpeg::Error::from(sts));
             }
