@@ -21,7 +21,9 @@ jobs:
     - name: Install rust
       run: rustup install stable
     - uses: actions/checkout@v4
-    - name: Build
+    - name: Build (Default)
+      run: cargo build --verbose --locked
+    - name: Build (All Features)
       run: cargo build --verbose --locked --all-features
     - name: Format
       run: cargo fmt --check
