@@ -41,10 +41,13 @@ log-once = "0.4.1"
 drm = "0.14.0"
 ash = { version = "0.38.0", optional = true }
 
-# [patch.crates-io]
+[patch.crates-io]
+# Waiting on https://github.com/zmwangx/rust-ffmpeg-sys/pull/91
+ffmpeg-sys-next = { git = "https://github.com/russelltg/rust-ffmpeg-sys", branch = "vulkan" }
+
+# Uncomment for local dev
 # ffmpeg-next = { path = "../rust-ffmpeg" }
 # ffmpeg-sys-next = { path = "../rust-ffmpeg-sys" }
-
 
 [dev-dependencies]
 nix = { version = "0.30.0", default-features = false, features = [
