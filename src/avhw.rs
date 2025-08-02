@@ -212,31 +212,22 @@ impl AvHwDevCtx {
                         p_view_formats: vk.image_fmt_list_info_fmts.as_ptr(),
                         ..Default::default()
                     };
-                    vk.drm_info = ash::vk::ImageDrmFormatModifierListCreateInfoEXT::default();
+
                     vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
+                    vk.drm_info.drm_format_modifier_count = modifiers_filtered.len() as u32;
+                    vk.drm_info.p_drm_format_modifiers = modifiers_filtered.as_ptr() as _;
 
-                    // some buffer requirements are complex, just start removing modifiers until it works
-                    let mut sts = -1;
-                    while sts != 0 && !modifiers_filtered.is_empty() {
-                        vk.drm_info.drm_format_modifier_count = modifiers_filtered.len() as u32;
-                        vk.drm_info.p_drm_format_modifiers = modifiers_filtered.as_ptr() as _;
+                    let vk_ptr = &mut *(hwframe_casted.hwctx as *mut AVVulkanFramesContext);
 
-                        let vk_ptr = hwframe_casted.hwctx as *mut AVVulkanFramesContext;
+                    vk_ptr.tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
+                    vk_ptr.usage |= vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                        | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
+                    vk_ptr.create_pnext = &mut vk.drm_info
+                        as *mut ash::vk::ImageDrmFormatModifierListCreateInfoEXT
+                        as _;
 
-                        (*vk_ptr).tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
-                        (*vk_ptr).usage |= vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
-                            | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
-                        (*vk_ptr).create_pnext = &mut vk.drm_info
-                            as *mut ash::vk::ImageDrmFormatModifierListCreateInfoEXT
-                            as _;
-
-                        sts = av_hwframe_ctx_init(hwframe);
-
-                        if sts != 0 {
-                            modifiers_filtered.pop();
-                        }
-                    }
+                    let sts = av_hwframe_ctx_init(hwframe);
 
                     // NOTE: safe because this can't change the address of the array
                     vk.vk_modifiers = Pin::new(modifiers_filtered.into_boxed_slice());
