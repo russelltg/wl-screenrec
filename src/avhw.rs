@@ -1,6 +1,6 @@
+use std::{ffi::CString, path::Path, ptr::null_mut};
 #[cfg(feature = "experimental-vulkan")]
 use std::{os::raw::c_void, pin::Pin};
-use std::{ffi::CString, path::Path, ptr::null_mut};
 
 use ffmpeg::{
     dict,
@@ -118,10 +118,9 @@ impl AvHwDevCtx {
             let sts = if self.fmt == Pixel::VULKAN {
                 #[cfg(feature = "experimental-vulkan")]
                 {
-                    use ash::vk::{self, DrmFormatModifierPropertiesEXT, FormatProperties2};
+                    use ash::vk;
                     use ffmpeg::ffi::{
-                        av_vkfmt_from_pixfmt, AVHWDeviceContext, AVVulkanDeviceContext,
-                        AVVulkanFramesContext,
+                        AVHWDeviceContext, AVVulkanDeviceContext, AVVulkanFramesContext,
                     };
 
                     let av_devctx = &(*((*self.as_mut_ptr()).data as *mut AVHWDeviceContext));
@@ -134,82 +133,30 @@ impl AvHwDevCtx {
                         vk_hwctx.inst,
                     );
 
-                    let mut drm_props = ash::vk::DrmFormatModifierPropertiesListEXT::default();
-                    inst.get_physical_device_format_properties2(
+                    let usage = vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                        | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
+
+                    let pixfmt_vk = vkfmt_from_pixfmt(pixfmt)?;
+                    let modifiers_filtered = vk_filter_drm_modifiers(
+                        inst,
                         vk_hwctx.phys_dev,
-                        *av_vkfmt_from_pixfmt(pixfmt.into()),
-                        &mut FormatProperties2::default().push_next(&mut drm_props),
+                        pixfmt_vk,
+                        usage,
+                        modifiers,
+                        width,
+                        height,
                     );
-                    let mut props_storage = vec![
-                        DrmFormatModifierPropertiesEXT::default();
-                        drm_props.drm_format_modifier_count as usize
-                    ];
-                    drm_props.p_drm_format_modifier_properties = props_storage.as_mut_ptr();
-                    inst.get_physical_device_format_properties2(
-                        vk_hwctx.phys_dev,
-                        *av_vkfmt_from_pixfmt(pixfmt.into()),
-                        &mut FormatProperties2::default().push_next(&mut drm_props),
-                    );
-
-                    let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
-                    'outer: for modifier in modifiers {
-                        let mut drm_info =
-                            ash::vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
-                                .drm_format_modifier(modifier.0);
-
-                        let mut image_format_prop = ash::vk::ImageFormatProperties2::default();
-
-                        if let Ok(()) = inst.get_physical_device_image_format_properties2(
-                            vk_hwctx.phys_dev,
-                            &vk::PhysicalDeviceImageFormatInfo2::default()
-                                .format(*av_vkfmt_from_pixfmt(pixfmt.into()))
-                                .usage(
-                                    vk::ImageUsageFlags::TRANSFER_DST
-                                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
-                                        | vk::ImageUsageFlags::SAMPLED,
-                                )
-                                .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-                                .push_next(&mut drm_info),
-                            &mut image_format_prop,
-                        ) {
-                            if image_format_prop.image_format_properties.max_extent.width
-                                < width as u32
-                                || image_format_prop.image_format_properties.max_extent.height
-                                    < height as u32
-                            {
-                                log::debug!(
-                                    "modifier {:?} not supported for size {}x{} (max extents {}x{})",
-                                    modifier, width, height, image_format_prop.image_format_properties.max_extent.width,
-                                    image_format_prop.image_format_properties.max_extent.height
-                                );
-                                continue; // modifier not supported for this size
-                            }
-
-                            for m in &props_storage {
-                                if m.drm_format_modifier == modifier.0
-                                    && m.drm_format_modifier_plane_count > 1
-                                {
-                                    log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
-                                            m.drm_format_modifier_plane_count);
-                                    continue 'outer;
-                                }
-                            }
-
-                            modifiers_filtered.push(*modifier);
-                        }
-                    }
 
                     let mut vk_bufs = AvHwDevCtxVulkanBuffers::new(
                         modifiers_filtered.into_boxed_slice(),
-                        pixfmt,
+                        pixfmt_vk,
                     );
 
                     let vk_ptr = &mut *(hwframe_casted.hwctx as *mut AVVulkanFramesContext);
 
                     vk_ptr.tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
-                    vk_ptr.usage |= vk::ImageUsageFlags::TRANSFER_DST
-                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
-                        | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
+                    vk_ptr.usage = usage;
                     vk_ptr.create_pnext = vk_bufs.as_mut().chain_ptr();
 
                     vk = Some(vk_bufs);
@@ -253,7 +200,114 @@ impl Drop for AvHwDevCtx {
     }
 }
 
+#[cfg(feature = "experimental-vulkan")]
+fn vkfmt_from_pixfmt(pix: Pixel) -> Result<ash::vk::Format, ffmpeg::Error> {
+    use ffmpeg_sys_next::av_vkfmt_from_pixfmt;
+
+    // Safety: av_vkfmt_from_pixfmt is safe with any argument
+    // if it returns a value, it will be a valid pointer to an ash::vk::Format
+    unsafe {
+        let res = av_vkfmt_from_pixfmt(pix.into());
+        if res.is_null() {
+            Err(ffmpeg::Error::InvalidData)
+        } else {
+            Ok(*res)
+        }
+    }
+}
+
+#[cfg(feature = "experimental-vulkan")]
+fn vk_filter_drm_modifiers(
+    inst: ash::Instance,
+    phys_dev: ash::vk::PhysicalDevice,
+    pixfmt_vk: ash::vk::Format,
+    usage: ash::vk::ImageUsageFlags,
+    in_modifiers: &[DrmModifier],
+    width: i32,
+    height: i32,
+) -> Vec<DrmModifier> {
+    use ash::vk;
+
+    let drm_modifier_props = get_drm_format_modifier_properties(&inst, phys_dev, pixfmt_vk);
+
+    let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
+
+    'outer: for modifier in in_modifiers {
+        let mut drm_info = ash::vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
+            .drm_format_modifier(modifier.0);
+
+        let mut image_format_prop = ash::vk::ImageFormatProperties2::default();
+
+        if let Ok(()) = unsafe {
+            inst.get_physical_device_image_format_properties2(
+                phys_dev,
+                &vk::PhysicalDeviceImageFormatInfo2::default()
+                    .format(pixfmt_vk)
+                    .usage(usage)
+                    .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                    .push_next(&mut drm_info),
+                &mut image_format_prop,
+            )
+        } {
+            if image_format_prop.image_format_properties.max_extent.width < width as u32
+                || image_format_prop.image_format_properties.max_extent.height < height as u32
+            {
+                log::debug!(
+                    "modifier {:?} not supported for size {}x{} (max extents {}x{})",
+                    modifier,
+                    width,
+                    height,
+                    image_format_prop.image_format_properties.max_extent.width,
+                    image_format_prop.image_format_properties.max_extent.height
+                );
+                continue; // modifier not supported for this size
+            }
+
+            for m in &drm_modifier_props {
+                if m.drm_format_modifier == modifier.0 && m.drm_format_modifier_plane_count > 1 {
+                    log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
+                            m.drm_format_modifier_plane_count);
+                    continue 'outer;
+                }
+            }
+
+            modifiers_filtered.push(*modifier);
+        }
+    }
+    modifiers_filtered
+}
+
+#[cfg(feature = "experimental-vulkan")]
+fn get_drm_format_modifier_properties(
+    inst: &ash::Instance,
+    phys_dev: ash::vk::PhysicalDevice,
+    pixfmt: ash::vk::Format,
+) -> Vec<ash::vk::DrmFormatModifierPropertiesEXT> {
+    let mut drm_props = ash::vk::DrmFormatModifierPropertiesListEXT::default();
+    unsafe {
+        use ash::vk::{DrmFormatModifierPropertiesEXT, FormatProperties2};
+
+        inst.get_physical_device_format_properties2(
+            phys_dev,
+            pixfmt,
+            &mut FormatProperties2::default().push_next(&mut drm_props),
+        );
+        let mut props_storage = vec![
+            DrmFormatModifierPropertiesEXT::default();
+            drm_props.drm_format_modifier_count as usize
+        ];
+        drm_props.p_drm_format_modifier_properties = props_storage.as_mut_ptr();
+        inst.get_physical_device_format_properties2(
+            phys_dev,
+            pixfmt,
+            &mut FormatProperties2::default().push_next(&mut drm_props),
+        );
+        props_storage
+    }
+}
+
 // self-referencing struct of Vulkan buffers
+// also, the frames context will store a pointer to this struct, so more reaons it's !Unpin
 // 'static in here is a hack, it's really the lifetime of the AvHwDevCtxVulkanBuffers
 #[cfg(feature = "experimental-vulkan")]
 struct AvHwDevCtxVulkanBuffers {
@@ -266,14 +320,12 @@ struct AvHwDevCtxVulkanBuffers {
 
 #[cfg(feature = "experimental-vulkan")]
 impl AvHwDevCtxVulkanBuffers {
-    pub fn new(modifiers_filtered: Box<[DrmModifier]>, pixfmt: Pixel) -> Pin<Box<Self>> {
-        use ffmpeg::ffi::av_vkfmt_from_pixfmt;
-
+    pub fn new(modifiers_filtered: Box<[DrmModifier]>, pixfmt: ash::vk::Format) -> Pin<Box<Self>> {
         let mut vk = Box::pin(AvHwDevCtxVulkanBuffers {
             drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT::default(),
             vk_modifiers: Pin::new(modifiers_filtered),
             image_fmt_list_info: ash::vk::ImageFormatListCreateInfo::default(),
-            image_fmt_list_info_fmts: [unsafe { *av_vkfmt_from_pixfmt(pixfmt.into()) }],
+            image_fmt_list_info_fmts: [pixfmt],
             _pin: std::marker::PhantomPinned,
         });
 
