@@ -112,7 +112,6 @@ impl AvHwDevCtx {
             hwframe_casted.height = height;
             hwframe_casted.initial_pool_size = 5;
 
-
             #[cfg(feature = "experimental-vulkan")]
             let mut vk: Option<Pin<Box<AvHwDevCtxVulkanBuffers>>> = None;
 
@@ -162,7 +161,7 @@ impl AvHwDevCtx {
                             {
                                 log::debug!(
                                     "modifier {:?} not supported for size {}x{} (max extents {}x{})",
-                                    modifier, width, height, image_format_prop.image_format_properties.max_extent.width, 
+                                    modifier, width, height, image_format_prop.image_format_properties.max_extent.width,
                                     image_format_prop.image_format_properties.max_extent.height
                                 );
                                 continue; // modifier not supported for this size
