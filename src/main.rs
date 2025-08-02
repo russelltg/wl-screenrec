@@ -695,7 +695,7 @@ impl<S: CaptureSource + 'static> Dispatch<WlRegistry, GlobalListContents> for St
         qhandle: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_registry::Event;
-        debug!("wl-registry event: {:?}", event);
+        debug!("wl-registry event: {event:?}");
         match event {
             Event::GlobalRemove { name } => {
                 if let EncConstructionStage::Complete(c) = &mut state.enc {
@@ -1214,7 +1214,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 p.partial_outputs
                     .iter()
                     .filter(|(id, _)| !p.outputs.contains_key(id))
-                    .map(|(id, po)| format!("({id:?}, {:?})", po))
+                    .map(|(id, po)| format!("({id:?}, {po:?})"))
                     .collect::<Vec<_>>()
                     .join(", ")
             );
@@ -1244,7 +1244,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 if let Some(&output) = enabled_outputs.iter().find(|i| i.name == disp) {
                     (output, Rect::new((0, 0), output.size_screen_space()))
                 } else {
-                    eprintln!("display {} not found, bailing", disp);
+                    eprintln!("display {disp} not found, bailing");
                     self.quit_flag.store(1, Ordering::SeqCst);
                     return;
                 }
@@ -1268,10 +1268,7 @@ impl<S: CaptureSource + 'static> State<S> {
                         ),
                     )
                 } else {
-                    eprintln!(
-                        "region {},{} {}x{} is not entirely within one output, bailing",
-                        x, y, w, h
-                    );
+                    eprintln!("region {x},{y} {w}x{h} is not entirely within one output, bailing",);
                     self.quit_flag.store(1, Ordering::SeqCst);
                     return;
                 }
@@ -1290,7 +1287,7 @@ impl<S: CaptureSource + 'static> State<S> {
         let cap = match S::new(&self.gm, qhandle, output.output.clone()) {
             Ok(cap) => cap,
             Err(err) => {
-                eprintln!("failed to create capture state: {}", err);
+                eprintln!("failed to create capture state: {err}");
                 self.quit_flag.store(1, SeqCst);
                 return;
             }
@@ -1434,8 +1431,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 DrmFourcc::Xrgb2101010,
             ] {
                 let find = capture_formats.iter().find(|p| {
-                    p.fourcc == preferred_format
-                        && p.modifiers.iter().any(|m| *m == DrmModifier::LINEAR)
+                    p.fourcc == preferred_format && p.modifiers.contains(&DrmModifier::LINEAR)
                 });
 
                 if let Some(find) = find {
@@ -1856,7 +1852,7 @@ impl EncState {
                 LowPowerMode::Auto => match enc.open_with(low_power_opts.clone()) {
                     Ok(enc) => (enc, low_power_opts),
                     Err(e) => {
-                        eprintln!("failed to open encoder in low_power mode ({}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning", e);
+                        eprintln!("failed to open encoder in low_power mode ({e}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning");
                         (
                             make_video_params(
                                 args,
@@ -1950,7 +1946,7 @@ impl EncState {
                 .unwrap_or(0);
 
             eprintln!("SIGUSR1 received, flushing history");
-            info!("pts offset is {:?}ns", pts_offset_ns);
+            info!("pts offset is {pts_offset_ns:?}ns");
 
             // grab this before we set history_state
             let mut hist_moved = VecDeque::new();
