@@ -108,6 +108,34 @@ fn basic() {
     assert!(dur < Duration::from_secs_f64(3.5), "{:?} > 3.5s", dur);
 }
 
+#[cfg(feature = "experimental-vulkan")]
+#[test]
+fn basic_vulkan() {
+    let filename = temp_dir().join("basic_vulkan.mp4");
+
+    let mut cmd = Command::new(dbg!(wl_screenrec()))
+        .arg("--no-damage")
+        .arg("--experimental-vulkan")
+        .arg("-f")
+        .arg(&filename)
+        .spawn()
+        .unwrap();
+    let pid = Pid::from_raw(cmd.id() as i32);
+
+    sleep(Duration::from_secs(3));
+
+    kill(pid, SIGINT).unwrap();
+
+    let wait_start = Instant::now();
+    cmd.wait().unwrap();
+    assert!(wait_start.elapsed() < Duration::from_secs(1));
+
+    let dur = file_duration(&filename);
+
+    assert!(dur > Duration::from_secs_f64(2.5), "{:?} < 2.5s", dur);
+    assert!(dur < Duration::from_secs_f64(3.5), "{:?} > 3.5s", dur);
+}
+
 fn file_metadata(filename: &Path) -> Value {
     serde_json::from_str(
         &String::from_utf8(
