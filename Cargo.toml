@@ -31,7 +31,6 @@ ffmpeg-next = "7.0.1"
 ffmpeg-sys-next = "7.0.0" # need direct dep on -sys to get metadata to consume in build.rs
 thiserror = "2.0.3"
 human-size = "0.4.2"
-signal-hook = "0.3.15"
 anyhow = "1.0.71"
 libc = "0.2.147"
 simplelog = "0.12.1"
@@ -40,6 +39,9 @@ clap_complete = "4.5.8"
 log-once = "0.4.1"
 drm = "0.14.0"
 ash = { version = "0.38.0", optional = true }
+mio = { version = "1.0.4", features = ["os-poll"] }
+signal-hook = "0.3.15"
+signal-hook-mio = { version = "0.2.4", features = ["support-v1_0"] }
 
 [patch.crates-io]
 # Waiting on https://github.com/zmwangx/rust-ffmpeg-sys/pull/91
