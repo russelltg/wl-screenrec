@@ -14,12 +14,7 @@ use std::{
     process::exit,
     ptr::null_mut,
     str::from_utf8_unchecked,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    thread::{self, sleep},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{anyhow, bail, format_err, Context};
@@ -359,36 +354,40 @@ enum CaptureBackend {
 }
 
 struct FpsCounter {
-    ct: Arc<AtomicU64>,
+    last_ct: u64,
+    ct: u64,
+    next_report: Instant,
 }
 
 impl FpsCounter {
+    const PER: Duration = Duration::from_secs(1);
+
     fn new() -> Self {
-        let ct = Arc::new(AtomicU64::new(0));
-        let ct_weak = Arc::<AtomicU64>::downgrade(&ct);
-
-        thread::Builder::new()
-            .name("FpsCounter".to_owned())
-            .spawn(move || {
-                let mut last_ct = 0;
-                loop {
-                    sleep(Duration::from_millis(1000));
-
-                    if let Some(ct_ptr) = ct_weak.upgrade() {
-                        let ct = ct_ptr.load(Ordering::SeqCst);
-                        let _ = write!(stdout().lock(), "{} fps\n", ct - last_ct); // ignore errors, can indicate stdout was closed
-                        last_ct = ct;
-                    } else {
-                        return;
-                    }
-                }
-            })
-            .unwrap();
-
-        Self { ct }
+        Self {
+            last_ct: 0,
+            ct: 0,
+            next_report: Instant::now() + Self::PER,
+        }
     }
     fn on_frame(&mut self) {
-        self.ct.fetch_add(1, Ordering::SeqCst);
+        self.ct += 1;
+    }
+
+    fn report(&mut self) {
+        if Instant::now() > self.next_report {
+            let _ = write!(stdout().lock(), "{} fps\n", self.ct - self.last_ct); // ignore errors, can indicate stdout was closed
+            self.next_report += Self::PER;
+            self.last_ct = self.ct;
+        }
+    }
+
+    fn time_until_next_report(&self) -> Duration {
+        let now = Instant::now();
+        if now > self.next_report {
+            Duration::from_secs(0)
+        } else {
+            self.next_report - now
+        }
     }
 }
 
@@ -2424,7 +2423,10 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
         queue.flush().unwrap();
         let mut rg = Some(queue.prepare_read().unwrap());
 
-        match poll.poll(&mut events, None) {
+        match poll.poll(
+            &mut events,
+            Some(state.fps_counter.time_until_next_report()),
+        ) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {
                 continue 'outer;
             }
@@ -2454,6 +2456,8 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
                 _ => {}
             }
         }
+
+        state.fps_counter.report();
 
         if state.errored {
             break EXIT_FAILURE;
