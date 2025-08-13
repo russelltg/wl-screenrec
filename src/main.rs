@@ -9,16 +9,13 @@ use std::{
     marker::PhantomData,
     mem::{self, swap},
     num::ParseIntError,
-    os::fd::BorrowedFd,
+    os::fd::{AsFd, AsRawFd, BorrowedFd},
     path::Path,
     process::exit,
     ptr::null_mut,
     str::from_utf8_unchecked,
     sync::{
-        atomic::{
-            AtomicBool, AtomicU64, AtomicUsize,
-            Ordering::{self, SeqCst},
-        },
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
     thread::{self, sleep},
@@ -45,8 +42,11 @@ use ffmpeg::{
     media, Packet, Rational,
 };
 use human_size::{Byte, Megabyte, Size, SpecificSize};
+use libc::{EXIT_FAILURE, EXIT_SUCCESS};
 use log::{debug, error, info, trace, warn};
+use mio::{unix::SourceFd, Events, Interest, Token};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+use signal_hook_mio::v1_0::Signals;
 use simplelog::{ColorChoice, CombinedLogger, LevelFilter, TermLogger, TerminalMode};
 use thiserror::Error;
 use transform::{transpose_if_transform_transposed, Rect};
@@ -560,8 +560,7 @@ struct State<S: CaptureSource> {
     starting_timestamp: Option<i64>,
     fps_counter: FpsCounter,
     args: Args,
-    quit_flag: Arc<AtomicUsize>,
-    sigusr1_flag: Arc<AtomicBool>,
+    errored: bool,
     gm: GlobalList,
     xdg_output_manager: ZxdgOutputManagerV1,
 }
@@ -586,6 +585,7 @@ impl<S: CaptureSource> InFlightSurface<S> {
 struct ProbingOutputsState {
     partial_outputs: HashMap<TypedObjectId<WlOutput>, PartialOutputInfo>, // key is xdg-output name (wayland object ID)
     outputs: HashMap<TypedObjectId<WlOutput>, Option<OutputInfo>>,        // none for disabled
+    history_already_triggered: bool,
 }
 
 struct CompleteState<S> {
@@ -607,6 +607,7 @@ enum EncConstructionStage<S> {
         roi: Rect,
         cap: S,
         output: OutputInfo,
+        history_already_triggered: bool,
     },
     Complete(CompleteState<S>),
     OutputWentAway(OutputWentAwayState),
@@ -635,6 +636,23 @@ impl<S> EncConstructionStage<S> {
             EncConstructionStage::EverythingButFormat { cap, .. } => cap,
             EncConstructionStage::Complete(e) => &mut e.cap,
             _ => panic!("no capture source yet"),
+        }
+    }
+
+    fn on_sigusr1(&mut self) {
+        match self {
+            EncConstructionStage::ProbingOutputs(probing_outputs_state) => {
+                probing_outputs_state.history_already_triggered = true
+            }
+            EncConstructionStage::EverythingButFormat {
+                ref mut history_already_triggered,
+                ..
+            } => *history_already_triggered = true,
+            EncConstructionStage::Complete(complete_state) => complete_state.enc.trigger_history(),
+            EncConstructionStage::OutputWentAway(output_went_away_state) => {
+                output_went_away_state.enc.trigger_history()
+            }
+            EncConstructionStage::Intermediate => unreachable!("enc left in intermediate state"),
         }
     }
 }
@@ -857,12 +875,7 @@ fn dmabuf_to_av(dmabuf: DrmFourcc) -> Pixel {
 }
 
 impl<S: CaptureSource + 'static> State<S> {
-    fn new(
-        conn: &Connection,
-        args: Args,
-        quit_flag: Arc<AtomicUsize>,
-        sigusr1_flag: Arc<AtomicBool>,
-    ) -> anyhow::Result<(Self, EventQueue<Self>)> {
+    fn new(conn: &Connection, args: Args) -> anyhow::Result<(Self, EventQueue<Self>)> {
         let display = conn.display();
 
         let (gm, queue) = registry_queue_init(conn).unwrap();
@@ -912,12 +925,12 @@ impl<S: CaptureSource + 'static> State<S> {
                 enc: EncConstructionStage::ProbingOutputs(ProbingOutputsState {
                     partial_outputs,
                     outputs: HashMap::new(),
+                    history_already_triggered: false,
                 }),
                 starting_timestamp: None,
                 fps_counter: FpsCounter::new(),
                 args,
-                quit_flag,
-                sigusr1_flag,
+                errored: false,
                 gm,
                 xdg_output_manager,
             },
@@ -1232,7 +1245,7 @@ impl<S: CaptureSource + 'static> State<S> {
                     eprintln!(
                         "multiple enabled displays and no --geometry or --output supplied, bailing"
                     );
-                    self.quit_flag.store(1, Ordering::SeqCst);
+                    self.errored = true;
                     return;
                 }
 
@@ -1245,7 +1258,7 @@ impl<S: CaptureSource + 'static> State<S> {
                     (output, Rect::new((0, 0), output.size_screen_space()))
                 } else {
                     eprintln!("display {disp} not found, bailing");
-                    self.quit_flag.store(1, Ordering::SeqCst);
+                    self.errored = true;
                     return;
                 }
             }
@@ -1269,7 +1282,7 @@ impl<S: CaptureSource + 'static> State<S> {
                     )
                 } else {
                     eprintln!("region {x},{y} {w}x{h} is not entirely within one output, bailing",);
-                    self.quit_flag.store(1, Ordering::SeqCst);
+                    self.errored = true;
                     return;
                 }
             }
@@ -1277,7 +1290,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 eprintln!(
                     "both --geometry and --output were passed, which is not allowed, bailing"
                 );
-                self.quit_flag.store(1, Ordering::SeqCst);
+                self.errored = true;
                 return;
             }
         };
@@ -1288,7 +1301,7 @@ impl<S: CaptureSource + 'static> State<S> {
             Ok(cap) => cap,
             Err(err) => {
                 eprintln!("failed to create capture state: {err}");
-                self.quit_flag.store(1, SeqCst);
+                self.errored = true;
                 return;
             }
         };
@@ -1296,6 +1309,7 @@ impl<S: CaptureSource + 'static> State<S> {
             roi,
             cap,
             output: output.clone(),
+            history_already_triggered: p.history_already_triggered,
         };
 
         self.queue_alloc_frame(qhandle);
@@ -1455,20 +1469,25 @@ impl<S: CaptureSource + 'static> State<S> {
         };
 
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
-            EncConstructionStage::EverythingButFormat { output, roi, cap } => {
+            EncConstructionStage::EverythingButFormat {
+                output,
+                roi,
+                cap,
+                history_already_triggered,
+            } => {
                 let enc = match EncState::new(
                     &self.args,
                     selected_format,
                     output.refresh,
                     output.transform,
                     roi,
-                    Arc::clone(&self.sigusr1_flag),
+                    history_already_triggered,
                     dri_device,
                 ) {
                     Ok(enc) => enc,
                     Err(e) => {
                         error!("failed to create encoder(s): {e}");
-                        self.quit_flag.store(1, SeqCst);
+                        self.errored = true;
                         return;
                     }
                 };
@@ -1486,7 +1505,7 @@ impl<S: CaptureSource + 'static> State<S> {
                     Ok(enc) => enc,
                     Err(e) => {
                         error!("failed to renegotiate new format {selected_format:?}: {e}");
-                        self.quit_flag.store(1, SeqCst);
+                        self.errored = true;
                         return;
                     }
                 };
@@ -1527,7 +1546,6 @@ struct EncState {
     filter_output_timebase: Rational,
     vid_stream_idx: usize,
     history_state: HistoryState,
-    sigusr1_flag: Arc<AtomicBool>,
     audio: Option<AudioHandle>,
     selected_format: DmabufFormat,
     hw_device_ctx: AvHwDevCtx,
@@ -1712,7 +1730,7 @@ impl EncState {
         refresh: Rational,
         transform: Transform,
         roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
-        sigusr1_flag: Arc<AtomicBool>,
+        history_alreday_triggered: bool,
         dri_device: &Path,
     ) -> anyhow::Result<Self> {
         let muxer_options = if let Some(muxer_options) = &args.ffmpeg_muxer_options {
@@ -1899,6 +1917,7 @@ impl EncState {
         }
 
         let history_state = match args.history {
+            Some(_) if history_alreday_triggered => HistoryState::Recording(0), // SIGUSR1 triggered before negotiation complete
             Some(history) => HistoryState::RecordingHistory(history, VecDeque::new()),
             None => HistoryState::Recording(0), // recording since the beginnging, no PTS offset
         };
@@ -1917,7 +1936,6 @@ impl EncState {
             enc_video_options,
             frames_rgb,
             history_state,
-            sigusr1_flag,
             audio,
             selected_format: capture_format,
             format_change: false,
@@ -1925,41 +1943,6 @@ impl EncState {
     }
 
     fn process_ready(&mut self) {
-        // if we were recording history and got the SIGUSR1 flag
-        if let (HistoryState::RecordingHistory(_, hist), true) = (
-            &mut self.history_state,
-            self.sigusr1_flag.load(Ordering::SeqCst),
-        ) {
-            // write history to container
-
-            // find minumum PTS offset of all streams to make sure
-            // that there are no negative PTS values
-            let pts_offset_ns = self
-                .octx
-                .streams()
-                .filter_map(|st| hist.iter().find(|p| p.stream() == st.index()))
-                .map(|packet| {
-                    let tb = self.octx.stream(packet.stream()).unwrap().time_base();
-                    packet.pts().unwrap() * 1_000_000_000 * tb.0 as i64 / tb.1 as i64
-                })
-                .min()
-                .unwrap_or(0);
-
-            eprintln!("SIGUSR1 received, flushing history");
-            info!("pts offset is {pts_offset_ns:?}ns");
-
-            // grab this before we set history_state
-            let mut hist_moved = VecDeque::new();
-            swap(hist, &mut hist_moved);
-
-            // transition history state
-            self.history_state = HistoryState::Recording(pts_offset_ns);
-
-            for packet in hist_moved.drain(..) {
-                self.on_encoded_packet(packet);
-            }
-        }
-
         let mut yuv_frame = frame::Video::empty();
         while self
             .video_filter
@@ -2109,6 +2092,40 @@ impl EncState {
             .unwrap();
 
         self.process_ready();
+    }
+
+    fn trigger_history(&mut self) {
+        // if we were recording history and got the SIGUSR1 flag
+        if let HistoryState::RecordingHistory(_, hist) = &mut self.history_state {
+            // write history to container
+
+            // find minumum PTS offset of all streams to make sure
+            // that there are no negative PTS values
+            let pts_offset_ns = self
+                .octx
+                .streams()
+                .filter_map(|st| hist.iter().find(|p| p.stream() == st.index()))
+                .map(|packet| {
+                    let tb = self.octx.stream(packet.stream()).unwrap().time_base();
+                    packet.pts().unwrap() * 1_000_000_000 * tb.0 as i64 / tb.1 as i64
+                })
+                .min()
+                .unwrap_or(0);
+
+            eprintln!("SIGUSR1 received, flushing history");
+            info!("pts offset is {pts_offset_ns:?}ns");
+
+            // grab this before we set history_state
+            let mut hist_moved = VecDeque::new();
+            swap(hist, &mut hist_moved);
+
+            // transition history state
+            self.history_state = HistoryState::Recording(pts_offset_ns);
+
+            for packet in hist_moved.drain(..) {
+                self.on_encoded_packet(packet);
+            }
+        }
     }
 }
 
@@ -2363,13 +2380,7 @@ fn main() {
 }
 
 fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
-    let quit_flag = Arc::new(AtomicUsize::new(usize::MAX)); // ::MAX means still running, otherwise it's an exit value
-    let sigusr1_flag = Arc::new(AtomicBool::new(false));
-
-    signal_hook::flag::register_usize(SIGINT, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register_usize(SIGTERM, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register_usize(SIGHUP, Arc::clone(&quit_flag), 0).unwrap();
-    signal_hook::flag::register(SIGUSR1, Arc::clone(&sigusr1_flag)).unwrap();
+    let mut sigs = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1]).unwrap();
 
     ffmpeg_next::init().unwrap();
 
@@ -2377,22 +2388,74 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
     }
 
-    let (mut state, mut queue) = match State::<S>::new(&conn, args, quit_flag.clone(), sigusr1_flag)
-    {
+    let (mut state, mut queue) = match State::<S>::new(&conn, args) {
         Ok(res) => res,
         Err(e) => {
             eprintln!("{e}");
-            exit(1);
+            exit(EXIT_FAILURE);
         }
     };
 
-    while quit_flag.load(Ordering::SeqCst) == usize::MAX {
-        queue.blocking_dispatch(&mut state).unwrap();
-    }
+    const TOKEN_SIGS: Token = Token(0);
+    const TOKEN_WAYLAND: Token = Token(1);
 
+    let mut poll = mio::Poll::new().unwrap();
+    poll.registry()
+        .register(&mut sigs, TOKEN_SIGS, Interest::READABLE)
+        .unwrap();
+
+    poll.registry()
+        .register(
+            &mut SourceFd(&conn.as_fd().as_raw_fd()),
+            TOKEN_WAYLAND,
+            Interest::READABLE,
+        )
+        .unwrap();
+
+    let mut events = Events::with_capacity(2);
+
+    let exit_code = 'outer: loop {
+        queue.flush().unwrap();
+        let mut rg = Some(queue.prepare_read().unwrap());
+
+        match poll.poll(&mut events, None) {
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                continue 'outer;
+            }
+            Err(e) => panic!("{e:?}"),
+            Ok(()) => {}
+        }
+
+        for ev in events.iter() {
+            match ev.token() {
+                TOKEN_SIGS if ev.is_readable() => {
+                    for sig in sigs.pending() {
+                        match sig {
+                            SIGINT | SIGTERM | SIGHUP => {
+                                break 'outer EXIT_SUCCESS;
+                            }
+                            SIGUSR1 => {
+                                state.enc.on_sigusr1();
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                TOKEN_WAYLAND if ev.is_readable() => {
+                    rg.take().unwrap().read().unwrap();
+                    queue.dispatch_pending(&mut state).unwrap();
+                }
+                _ => {}
+            }
+        }
+
+        if state.errored {
+            break EXIT_FAILURE;
+        }
+    };
     if let EncConstructionStage::Complete(c) = &mut state.enc {
         c.enc.flush();
     }
 
-    exit(quit_flag.load(Ordering::SeqCst) as i32)
+    exit(exit_code);
 }
