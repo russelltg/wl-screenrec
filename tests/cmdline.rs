@@ -29,6 +29,7 @@ fn history_clip_length() {
 
     let mut cmd = Command::new(dbg!(wl_screenrec()))
         .arg("--no-damage")
+        .arg("--capture-backend=wlr-screencopy")
         .arg("--audio")
         .arg("--gop-size=5")
         .arg("--history=2")
@@ -64,6 +65,7 @@ fn scale() {
 
     let mut cmd = Command::new(dbg!(wl_screenrec()))
         .arg("--no-damage")
+        .arg("--capture-backend=wlr-screencopy")
         .arg("--encode-resolution=128x128")
         .arg("-g=0,0 256x256")
         .arg("-f")
@@ -88,6 +90,7 @@ fn basic() {
 
     let mut cmd = Command::new(dbg!(wl_screenrec()))
         .arg("--no-damage")
+        .arg("--capture-backend=wlr-screencopy")
         .arg("-f")
         .arg(&filename)
         .spawn()
@@ -116,6 +119,7 @@ fn basic_vulkan() {
     let mut cmd = Command::new(dbg!(wl_screenrec()))
         .arg("--no-damage")
         .arg("--experimental-vulkan")
+        .arg("--capture-backend=wlr-screencopy")
         .arg("-f")
         .arg(&filename)
         .spawn()
