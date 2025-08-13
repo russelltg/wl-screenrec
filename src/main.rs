@@ -5,7 +5,7 @@ use std::{
     ffi::{c_int, CStr, CString},
     fmt,
     hash::Hash,
-    io,
+    io::{self, stdout, Write},
     marker::PhantomData,
     mem::{self, swap},
     num::ParseIntError,
@@ -376,7 +376,7 @@ impl FpsCounter {
 
                     if let Some(ct_ptr) = ct_weak.upgrade() {
                         let ct = ct_ptr.load(Ordering::SeqCst);
-                        println!("{} fps", ct - last_ct);
+                        let _ = write!(stdout().lock(), "{} fps\n", ct - last_ct); // ignore errors, can indicate stdout was closed
                         last_ct = ct;
                     } else {
                         return;
