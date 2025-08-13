@@ -1057,7 +1057,7 @@ impl<S: CaptureSource + 'static> State<S> {
 
         cs.enc.frames_rgb = cs.enc.hw_device_ctx
             .create_frame_ctx(capture_pixfmt, new_format.width, new_format.height, &new_format.modifiers)
-            .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_pixfmt:?} {new_format:?}"))?;
+            .with_context(|| format!("Failed to create {} frame context for capture surfaces of format {capture_pixfmt:?} {new_format:?}", if self.args.vulkan { "vulkan" } else { "vaapi" }))?;
 
         // todo: proper size here
         let enc_pixfmt_av = match cs.enc.enc_pixfmt {
@@ -2382,11 +2382,17 @@ fn main() {
 fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
     let mut sigs = Signals::new([SIGINT, SIGTERM, SIGHUP, SIGUSR1]).unwrap();
 
-    ffmpeg_next::init().unwrap();
-
     if args.verbose >= 3 {
         ffmpeg_next::log::set_level(ffmpeg::log::Level::Trace);
     }
+
+    ffmpeg_next::init().unwrap();
+
+    info!("FFmpeg version {}", unsafe {
+        CStr::from_ptr(ffmpeg_sys_next::av_version_info())
+            .to_str()
+            .unwrap()
+    });
 
     let (mut state, mut queue) = match State::<S>::new(&conn, args) {
         Ok(res) => res,
