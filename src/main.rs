@@ -1486,7 +1486,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 ) {
                     Ok(enc) => enc,
                     Err(e) => {
-                        error!("failed to create encoder(s): {e}");
+                        error!("failed to create encoder(s): {e:?}");
                         self.errored = true;
                         return;
                     }
