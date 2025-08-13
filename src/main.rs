@@ -2174,8 +2174,15 @@ fn video_filter(
     }
 
     // sink
-    g.add(&filter::find("buffersink").unwrap(), "out", "")
+    let mut out = g
+        .add(&filter::find("buffersink").unwrap(), "out", "")
         .unwrap();
+
+    out.set_pixel_format(match pix_fmt {
+        EncodePixelFormat::Sw(sw) => sw,
+        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+        EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
+    });
 
     let output_real_pixfmt_name = unsafe {
         from_utf8_unchecked(
