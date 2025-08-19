@@ -2501,7 +2501,15 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
                     }
                 }
                 TOKEN_WAYLAND if ev.is_readable() => {
-                    rg.take().unwrap().read().unwrap();
+                    if let Err(wayland_backend::client::WaylandError::Io(e)) =
+                        rg.take().unwrap().read()
+                    {
+                        if e.kind() == io::ErrorKind::WouldBlock {
+                            continue;
+                        } else {
+                            panic!("Error reading from wayland connection: {e}");
+                        }
+                    }
                     queue.dispatch_pending(&mut state).unwrap();
                 }
                 _ => {}
