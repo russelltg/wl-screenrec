@@ -49,7 +49,14 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             } => {
                 state.on_copy_complete(qhandle, tv_sec_hi, tv_sec_lo, tv_nsec);
             }
-            zwlr_screencopy_frame_v1::Event::BufferDone => {}
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                let cap = state.enc.unwrap_cap();
+                let device = cap.drm_device.clone();
+                let formats = std::mem::replace(&mut cap.formats, Vec::new());
+                let size = cap.size.unwrap();
+                state.negotiate_format(&formats, size, device.as_deref(), qhandle);
+                state.on_frame_allocd(qhandle, capture);
+            }
             zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
                 format,
                 width: dmabuf_width,
@@ -58,17 +65,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
                 let fourcc = DrmFourcc::try_from(format).unwrap();
                 let cap = state.enc.unwrap_cap();
 
-                let device = cap.drm_device.clone();
-                state.negotiate_format(
-                    &[DmabufPotentialFormat {
-                        fourcc,
-                        modifiers: vec![DrmModifier::LINEAR],
-                    }],
-                    (dmabuf_width, dmabuf_height),
-                    device.as_deref(),
-                    qhandle,
-                );
-                state.on_frame_allocd(qhandle, capture);
+                cap.formats.push(DmabufPotentialFormat {
+                    fourcc,
+                    modifiers: vec![DrmModifier::LINEAR],
+                });
+                cap.size = Some((dmabuf_width, dmabuf_height));
             }
             zwlr_screencopy_frame_v1::Event::Damage { .. } => {}
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
@@ -106,6 +107,8 @@ impl Dispatch<ZwpLinuxDmabufFeedbackV1, ()> for State<CapWlrScreencopy> {
 }
 
 pub struct CapWlrScreencopy {
+    formats: Vec<DmabufPotentialFormat>,
+    size: Option<(u32, u32)>,
     screencopy_manager: ZwlrScreencopyManagerV1,
     output: WlOutput,
     drm_device: Option<PathBuf>,
@@ -130,6 +133,8 @@ impl CaptureSource for CapWlrScreencopy {
             output,
             drm_device: None,
             cap_cursor: false,
+            formats: Vec::new(),
+            size: None,
         })
     }
 
