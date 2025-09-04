@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use drm::{buffer::DrmFourcc, node::{DrmNode, node_path}};
+use drm::{
+    buffer::DrmFourcc,
+    node::{node_path, DrmNode},
+};
 use libc::dev_t;
 use log::debug;
 use wayland_client::{
