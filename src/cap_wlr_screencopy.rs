@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use drm::{buffer::DrmFourcc, node::DrmNode};
+use drm::{buffer::DrmFourcc, node::{DrmNode, node_path}};
 use libc::dev_t;
 use log::debug;
 use wayland_client::{
@@ -95,13 +95,10 @@ impl Dispatch<ZwpLinuxDmabufFeedbackV1, ()> for State<CapWlrScreencopy> {
         if let Event::MainDevice { device } = event {
             let dev = dev_t::from_ne_bytes(device.try_into().unwrap());
             let node = DrmNode::from_dev_id(dev).unwrap();
-            let node = node
-                .node_with_type(drm::node::NodeType::Render)
-                .unwrap()
-                .unwrap();
+            let render_node_path = node_path(&node, drm::node::NodeType::Render).unwrap();
+
             state.enc.unwrap_cap().cap_cursor = state.args.cap_cursor;
-            let path = node.dev_path().unwrap();
-            state.enc.unwrap_cap().drm_device = Some(path);
+            state.enc.unwrap_cap().drm_device = Some(render_node_path);
         }
     }
 }
