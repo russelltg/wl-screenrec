@@ -27,8 +27,8 @@ wayland-protocols = { version = "0.32", features = [
     "staging",
 ] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-ffmpeg-next = "7.0.1"
-ffmpeg-sys-next = "7.0.0" # need direct dep on -sys to get metadata to consume in build.rs
+ffmpeg-next = "8.0.0"
+ffmpeg-sys-next = "8.0.1" # need direct dep on -sys to get metadata to consume in build.rs
 thiserror = "2.0.3"
 human-size = "0.4.2"
 anyhow = "1.0.71"
