@@ -2,26 +2,27 @@ use std::{
     cmp::max,
     ffi::{CStr, CString},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{channel, Receiver, RecvError, Sender, TryRecvError},
         Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{Receiver, RecvError, Sender, TryRecvError, channel},
     },
     thread::spawn,
 };
 
 use anyhow::{anyhow, bail};
 use ffmpeg::{
+    ChannelLayout, Dictionary, Format, Packet, Rational,
     codec::{Context, Id},
     decoder,
     encoder::{self},
     ffi::{av_channel_layout_describe, av_find_input_format},
     filter,
-    format::{self, context::Input, Sample},
-    frame, ChannelLayout, Dictionary, Format, Packet, Rational,
+    format::{self, Sample, context::Input},
+    frame,
 };
 use human_size::Byte;
 
-use crate::{fifo::AudioFifo, Args};
+use crate::{Args, fifo::AudioFifo};
 
 struct AudioState {
     enc_audio: encoder::Audio,

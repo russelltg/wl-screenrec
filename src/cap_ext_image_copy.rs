@@ -6,7 +6,7 @@ use libc::dev_t;
 use log::{debug, warn};
 use log_once::warn_once;
 use wayland_client::{
-    globals::GlobalList, protocol::wl_output::WlOutput, Dispatch, Proxy, QueueHandle,
+    Dispatch, Proxy, QueueHandle, globals::GlobalList, protocol::wl_output::WlOutput,
 };
 use wayland_protocols::ext::{
     image_capture_source::v1::client::{

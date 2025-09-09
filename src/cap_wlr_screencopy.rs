@@ -3,14 +3,14 @@ use std::path::PathBuf;
 use anyhow::Context;
 use drm::{
     buffer::DrmFourcc,
-    node::{node_path, DrmNode},
+    node::{DrmNode, node_path},
 };
 use libc::dev_t;
 use log::debug;
 use wayland_client::{
+    Connection, Dispatch, Proxy, QueueHandle,
     globals::GlobalList,
     protocol::{wl_buffer::WlBuffer, wl_output::WlOutput},
-    Connection, Dispatch, Proxy, QueueHandle,
 };
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,

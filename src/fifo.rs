@@ -2,8 +2,8 @@ use std::ptr::NonNull;
 
 use ffmpeg::{
     ffi::{
-        av_audio_fifo_alloc, av_audio_fifo_read, av_audio_fifo_size, av_audio_fifo_write,
-        AVAudioFifo,
+        AVAudioFifo, av_audio_fifo_alloc, av_audio_fifo_read, av_audio_fifo_size,
+        av_audio_fifo_write,
     },
     format,
     frame::Audio,

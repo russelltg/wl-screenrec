@@ -8,8 +8,8 @@ use std::{
 
 use nix::{
     sys::signal::{
-        kill,
         Signal::{SIGINT, SIGUSR1},
+        kill,
     },
     unistd::Pid,
 };
