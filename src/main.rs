@@ -2,10 +2,10 @@ extern crate ffmpeg_next as ffmpeg;
 
 use std::{
     collections::{HashMap, VecDeque},
-    ffi::{c_int, CStr, CString},
+    ffi::{CStr, CString, c_int},
     fmt,
     hash::Hash,
-    io::{self, stdout, Write},
+    io::{self, Write, stdout},
     marker::PhantomData,
     mem::{self, swap},
     num::ParseIntError,
@@ -17,44 +17,44 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{anyhow, bail, format_err, Context};
+use anyhow::{Context, anyhow, bail, format_err};
 use audio::AudioHandle;
 use cap_ext_image_copy::CapExtImageCopy;
 use cap_wlr_screencopy::CapWlrScreencopy;
-use clap::{command, ArgAction, CommandFactory, Parser};
+use clap::{ArgAction, CommandFactory, Parser, command};
 use drm::buffer::DrmFourcc;
 use ffmpeg::{
-    codec, dict, dictionary, encoder,
+    Packet, Rational, codec, dict, dictionary, encoder,
     ffi::{
+        AV_HWFRAME_MAP_WRITE, AVDRMFrameDescriptor, AVPixelFormat, FF_COMPLIANCE_STRICT,
         av_buffer_ref, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set,
         av_dict_parse_string, av_free, av_get_pix_fmt_name, av_hwframe_map, avcodec_alloc_context3,
         avfilter_graph_alloc_filter, avfilter_init_dict, avformat_query_codec,
-        AVDRMFrameDescriptor, AVPixelFormat, AV_HWFRAME_MAP_WRITE, FF_COMPLIANCE_STRICT,
     },
     filter,
     format::{self, Output, Pixel},
     frame::{self, video},
-    media, Packet, Rational,
+    media,
 };
 use fps_limit::FpsLimit;
 use human_size::{Byte, Megabyte, Size, SpecificSize};
 use libc::{EXIT_FAILURE, EXIT_SUCCESS};
 use log::{debug, error, info, trace, warn};
-use mio::{unix::SourceFd, Events, Interest, Token};
+use mio::{Events, Interest, Token, unix::SourceFd};
 use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
 use signal_hook_mio::v1_0::Signals;
 use simplelog::{ColorChoice, CombinedLogger, LevelFilter, TermLogger, TerminalMode};
 use thiserror::Error;
-use transform::{transpose_if_transform_transposed, Rect};
+use transform::{Rect, transpose_if_transform_transposed};
 use wayland_client::{
+    ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
     backend::ObjectId,
-    globals::{registry_queue_init, Global, GlobalList, GlobalListContents},
+    globals::{Global, GlobalList, GlobalListContents, registry_queue_init},
     protocol::{
         wl_buffer::WlBuffer,
         wl_output::{self, Mode, Transform, WlOutput},
         wl_registry::WlRegistry,
     },
-    ConnectError, Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols::{
     ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
@@ -556,7 +556,7 @@ struct DmabufFormat {
 }
 
 #[link(name = "drm")]
-extern "C" {
+unsafe extern "C" {
     pub fn drmGetFormatModifierVendor(modifier: u64) -> *mut libc::c_char;
     pub fn drmGetFormatModifierName(modifier: u64) -> *mut libc::c_char;
 }
@@ -659,7 +659,7 @@ impl<S> EncConstructionStage<S> {
                 probing_outputs_state.history_already_triggered = true
             }
             EncConstructionStage::EverythingButFormat {
-                ref mut history_already_triggered,
+                history_already_triggered,
                 ..
             } => *history_already_triggered = true,
             EncConstructionStage::Complete(complete_state) => complete_state.enc.trigger_history(),
@@ -1420,7 +1420,9 @@ impl<S: CaptureSource + 'static> State<S> {
             self.enc = EncConstructionStage::OutputWentAway(owa);
         } else if enc.format_change {
             enc.format_change = false;
-            debug!("failed transfer, but just did a format change so not surprising. trying to capture a new frame...");
+            debug!(
+                "failed transfer, but just did a format change so not surprising. trying to capture a new frame..."
+            );
             self.queue_alloc_frame(qhandle);
         } else {
             error!("unknown copy fail reason, trying to capture a new frame...");
@@ -1441,7 +1443,9 @@ impl<S: CaptureSource + 'static> State<S> {
         } else if let Some(dev) = dri_device {
             dev
         } else {
-            warn!("dri device could not be auto-detected, using /dev/dri/renderD128. Pass --dri-device if this isn't correct or to suppress this warning");
+            warn!(
+                "dri device could not be auto-detected, using /dev/dri/renderD128. Pass --dri-device if this isn't correct or to suppress this warning"
+            );
             Path::new("/dev/dri/renderD128")
         };
 
@@ -1468,7 +1472,10 @@ impl<S: CaptureSource + 'static> State<S> {
                     });
                 }
             }
-            bail!("failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}", capture_formats)
+            bail!(
+                "failed to select a viable capture format. This is probably a bug. Availabe capture formats are {:?}",
+                capture_formats
+            )
         }
 
         let selected_format = match negotiate_format_impl(w as i32, h as i32, capture_formats) {
@@ -1690,11 +1697,15 @@ fn get_encoder(args: &Args, format: &Output) -> anyhow::Result<ffmpeg::Codec> {
                 if let Some(codec) = ffmpeg_next::encoder::find_by_name(hw_codec_name) {
                     Some(codec)
                 } else {
-                    warn!("there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder...");
+                    warn!(
+                        "there is a known vaapi codec ({hw_codec_name}) for codec {codec_id:?}, but it's not available. Using a generic encoder..."
+                    );
                     None
                 }
             } else {
-                warn!("hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder...");
+                warn!(
+                    "hw flag is specified, but there's no known vaapi codec for {codec_id:?}. Using a generic encoder..."
+                );
                 None
             }
         } else {
@@ -1887,7 +1898,9 @@ impl EncState {
                 LowPowerMode::Auto => match enc.open_with(low_power_opts.clone()) {
                     Ok(enc) => (enc, low_power_opts),
                     Err(e) => {
-                        eprintln!("failed to open encoder in low_power mode ({e}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning");
+                        eprintln!(
+                            "failed to open encoder in low_power mode ({e}), trying non low_power mode. if you have an intel iGPU, set enable_guc=2 in the i915 module to use the fixed function encoder. pass --low-power=off to suppress this warning"
+                        );
                         (
                             make_video_params(
                                 args,
@@ -2062,11 +2075,16 @@ impl EncState {
                             }
 
                             debug!(
-                                "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}", 
-                                current_history_size, history_dur,
+                                "history is {:?} > {:?}, popping from history buffer {} bytes across {} packets on stream {:?}",
+                                current_history_size,
+                                history_dur,
                                 removed_bytes,
                                 removed_packets,
-                                self.octx.stream(last_in_stream.stream()).unwrap().parameters().medium()
+                                self.octx
+                                    .stream(last_in_stream.stream())
+                                    .unwrap()
+                                    .parameters()
+                                    .medium()
                             );
                         } else {
                             break; // there is a second keyframe in the stream, but it isn't old enough yet
@@ -2380,7 +2398,9 @@ fn main() {
         warn!("--ffmpeg-encoder passed with --codec, --codec will be ignored");
     }
     if args.encode_pixfmt == Some(Pixel::VAAPI) {
-        error!("`--encode-pixfmt vaapi` passed, this is nonsense. It will automatically be transformed into a vaapi pixel format if the selected encoder supports vaapi memory input");
+        error!(
+            "`--encode-pixfmt vaapi` passed, this is nonsense. It will automatically be transformed into a vaapi pixel format if the selected encoder supports vaapi memory input"
+        );
         exit(1);
     }
     if let Some(max_fps) = args.max_fps {
@@ -2393,7 +2413,9 @@ fn main() {
     let conn = match Connection::connect_to_env() {
         Ok(conn) => conn,
         Err(e @ ConnectError::NoCompositor) => {
-            error!("WAYLAND_DISPLAY or XDG_RUNTIME_DIR environment variables are not set or are set to an invalid value: {e}");
+            error!(
+                "WAYLAND_DISPLAY or XDG_RUNTIME_DIR environment variables are not set or are set to an invalid value: {e}"
+            );
             exit(1);
         }
         Err(e) => {
@@ -2410,7 +2432,9 @@ fn main() {
                 .contents()
                 .with_list(|l| l.iter().any(|g| g.interface == ext_image_copy_cap_name));
             if has_ext_image_copy_cap {
-                info!("Protocol {ext_image_copy_cap_name} found in globals, defaulting to it (use `--capture-backend` to override)");
+                info!(
+                    "Protocol {ext_image_copy_cap_name} found in globals, defaulting to it (use `--capture-backend` to override)"
+                );
                 execute::<CapExtImageCopy>(args, conn);
             } else {
                 info!(
