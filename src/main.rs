@@ -95,6 +95,8 @@ mod platform {
 }
 use platform::*;
 
+use crate::avhw::Usage;
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -503,7 +505,7 @@ struct DrmModifier(u64);
 
 impl DrmModifier {
     const LINEAR: DrmModifier = DrmModifier(0);
-    const INVALID: DrmModifier = DrmModifier(0xffffffffffffff); 
+    const INVALID: DrmModifier = DrmModifier(0xffffffffffffff);
 }
 
 impl fmt::Debug for DrmModifier {
@@ -1070,7 +1072,7 @@ impl<S: CaptureSource + 'static> State<S> {
         }
 
         cs.enc.frames_rgb = cs.enc.hw_device_ctx
-            .create_frame_ctx(capture_pixfmt, new_format.width, new_format.height, &new_format.modifiers)
+            .create_frame_ctx(capture_pixfmt, new_format.width, new_format.height, &new_format.modifiers, Usage::Capture)
             .with_context(|| format!("Failed to create {} frame context for capture surfaces of format {capture_pixfmt:?} {new_format:?}", if self.args.vulkan { "vulkan" } else { "vaapi" }))?;
 
         // todo: proper size here
@@ -1100,7 +1102,7 @@ impl<S: CaptureSource + 'static> State<S> {
         // create a new encoder
         // TODO: correct scaling
         let mut frames_yuv = cs.enc.hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h, &[DrmModifier::LINEAR])
+            .create_frame_ctx(enc_pixfmt_av, cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h, &[DrmModifier::LINEAR], Usage::Enc)
             .with_context(|| {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {}x{}", cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h)
             })?;
@@ -1833,7 +1835,7 @@ impl EncState {
         };
 
         let mut frames_rgb = hw_device_ctx
-            .create_frame_ctx(dmabuf_to_av(capture_format.fourcc), capture_format.width, capture_format.height, &capture_format.modifiers)
+            .create_frame_ctx(dmabuf_to_av(capture_format.fourcc), capture_format.width, capture_format.height, &capture_format.modifiers, Usage::Capture)
             .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_format:?}"))?;
 
         let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
@@ -1857,7 +1859,7 @@ impl EncState {
             EncodePixelFormat::Sw(fmt) => fmt,
         };
         let mut frames_yuv = hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord, &[DrmModifier::LINEAR])
+            .create_frame_ctx(enc_pixfmt_av, enc_w_screen_coord, enc_h_screen_coord, &[DrmModifier::LINEAR], Usage::Enc)
             .with_context(|| {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {enc_w_screen_coord}x{enc_h_screen_coord}")
             })?;

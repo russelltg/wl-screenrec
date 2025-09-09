@@ -21,6 +21,11 @@ pub struct AvHwDevCtx {
     fmt: Pixel,
 }
 
+pub enum Usage {
+    Capture,
+    Enc,
+}
+
 impl AvHwDevCtx {
     pub fn new_libva(dri_device: &Path) -> Result<Self, ffmpeg::Error> {
         unsafe {
@@ -100,6 +105,7 @@ impl AvHwDevCtx {
         width: i32,
         height: i32,
         modifiers: &[DrmModifier],
+        _usage: Usage,
     ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
             let mut hwframe = av_hwframe_ctx_alloc(self.ptr as *mut _);
@@ -133,16 +139,22 @@ impl AvHwDevCtx {
                         vk_hwctx.inst,
                     );
 
-                    let usage = vk::ImageUsageFlags::TRANSFER_DST
-                        | vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
-                        | vk::ImageUsageFlags::SAMPLED; // TODO: could split usage based on if this is output of the filter graph or not
+                    let vk_usage = match _usage {
+                        Usage::Capture => {
+                            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
+                        }
+                        Usage::Enc => {
+                            vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                                | vk::ImageUsageFlags::TRANSFER_DST
+                        }
+                    };
 
                     let pixfmt_vk = vkfmt_from_pixfmt(pixfmt)?;
                     let modifiers_filtered = vk_filter_drm_modifiers(
                         inst,
                         vk_hwctx.phys_dev,
                         pixfmt_vk,
-                        usage,
+                        vk_usage,
                         modifiers,
                         width,
                         height,
@@ -156,7 +168,7 @@ impl AvHwDevCtx {
                     let vk_ptr = &mut *(hwframe_casted.hwctx as *mut AVVulkanFramesContext);
 
                     vk_ptr.tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
-                    vk_ptr.usage = usage;
+                    vk_ptr.usage = vk_usage;
                     vk_ptr.create_pnext = vk_bufs.as_mut().chain_ptr();
 
                     vk = Some(vk_bufs);
