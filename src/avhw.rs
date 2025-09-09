@@ -240,8 +240,8 @@ fn vk_filter_drm_modifiers(
 ) -> Vec<DrmModifier> {
     use ash::vk;
 
-    #[cfg(not(ffmpeg_8_0))]
     let drm_modifier_props = get_drm_format_modifier_properties(&inst, phys_dev, pixfmt_vk);
+    log::debug!("vk format {pixfmt_vk:?} has drm modifiers {drm_modifier_props:?}",);
 
     let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
 
