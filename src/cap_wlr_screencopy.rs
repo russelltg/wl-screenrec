@@ -130,7 +130,9 @@ impl CaptureSource for CapWlrScreencopy {
 
         let output = match output {
             WhatToCapture::Output(wl_output) => wl_output,
-            WhatToCapture::Toplevel(_) => panic!("wlr-screencopy does not support toplevel capture"),
+            WhatToCapture::Toplevel(_) => {
+                panic!("wlr-screencopy does not support toplevel capture")
+            }
         };
 
         Ok(Self {

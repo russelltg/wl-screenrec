@@ -120,9 +120,9 @@ pub struct Args {
     filename: String,
 
     #[clap(
-        long, 
-        short, 
-        value_parser=parse_geometry, 
+        long,
+        short,
+        value_parser=parse_geometry,
         help="geometry to capture, format x,y WxH. Compatible with the output of `slurp`. Mutually exclusive with --output", 
         allow_hyphen_values=true,
         conflicts_with = "toplevel",
@@ -134,7 +134,7 @@ pub struct Args {
         short,
         help = "Which output (display) to record. Mutually exclusive with --geometry. Defaults to your only display if you only have one",
         default_value = "",
-        conflicts_with = "toplevel",
+        conflicts_with = "toplevel"
     )]
     output: String,
 
@@ -918,11 +918,10 @@ impl<S: CaptureSource> Dispatch<ExtForeignToplevelHandleV1, ()> for State<S> {
             ext_foreign_toplevel_handle_v1::Event::Closed => {}
             ext_foreign_toplevel_handle_v1::Event::Done => {}
             ext_foreign_toplevel_handle_v1::Event::Title { .. } => {}
-            ext_foreign_toplevel_handle_v1::Event::AppId { app_id  } => {
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
                 state.toplevels.push((app_id, proxy.clone()));
             }
-            ext_foreign_toplevel_handle_v1::Event::Identifier { .. } => {
-            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { .. } => {}
             _ => todo!(),
         }
     }
