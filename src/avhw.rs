@@ -233,6 +233,7 @@ fn vk_filter_drm_modifiers(
 
     let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
 
+    #[allow(unused_labels)]
     'outer: for modifier in in_modifiers {
         let mut drm_info = ash::vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
             .drm_format_modifier(modifier.0);
@@ -279,6 +280,8 @@ fn vk_filter_drm_modifiers(
     modifiers_filtered
 }
 
+
+#[allow(dead_code)]
 #[cfg(feature = "experimental-vulkan")]
 fn get_drm_format_modifier_properties(
     inst: &ash::Instance,
