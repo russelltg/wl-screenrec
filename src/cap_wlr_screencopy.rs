@@ -55,7 +55,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             zwlr_screencopy_frame_v1::Event::BufferDone => {
                 let cap = state.enc.unwrap_cap();
                 let device = cap.drm_device.clone();
-                let formats = std::mem::replace(&mut cap.formats, Vec::new());
+                let formats = std::mem::take(&mut cap.formats);
                 let size = cap.size.unwrap();
                 state.negotiate_format(&formats, size, device.as_deref(), qhandle);
                 state.on_frame_allocd(qhandle, capture);

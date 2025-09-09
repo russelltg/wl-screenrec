@@ -1599,7 +1599,7 @@ fn hw_codec_id(codec: codec::Id, vulkan: bool) -> Option<&'static str> {
         }
     }
 }
-
+#[allow(clippy::too_many_arguments)]
 fn make_video_params(
     args: &Args,
     enc_pix_fmt: EncodePixelFormat,
