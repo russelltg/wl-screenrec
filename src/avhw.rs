@@ -247,12 +247,14 @@ fn vk_filter_drm_modifiers(
 
     #[allow(unused_labels)]
     'outer: for modifier in in_modifiers {
+        use log::warn;
+
         let mut drm_info = ash::vk::PhysicalDeviceImageDrmFormatModifierInfoEXT::default()
             .drm_format_modifier(modifier.0);
 
         let mut image_format_prop = ash::vk::ImageFormatProperties2::default();
 
-        if let Ok(()) = unsafe {
+        match unsafe {
             inst.get_physical_device_image_format_properties2(
                 phys_dev,
                 &vk::PhysicalDeviceImageFormatInfo2::default()
@@ -263,32 +265,36 @@ fn vk_filter_drm_modifiers(
                 &mut image_format_prop,
             )
         } {
-            if image_format_prop.image_format_properties.max_extent.width < width as u32
-                || image_format_prop.image_format_properties.max_extent.height < height as u32
-            {
-                log::debug!(
-                    "modifier {:?} not supported for size {}x{} (max extents {}x{})",
-                    modifier,
-                    width,
-                    height,
-                    image_format_prop.image_format_properties.max_extent.width,
-                    image_format_prop.image_format_properties.max_extent.height
-                );
-                continue; // modifier not supported for this size
-            }
-
-            #[cfg(not(ffmpeg_8_0))]
-            for m in &drm_modifier_props {
-                if m.drm_format_modifier == modifier.0 && m.drm_format_modifier_plane_count > 1 {
-                    log::warn!(
-                        "ffmpeg < 8.0 buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes), skipping",
-                        m.drm_format_modifier_plane_count
+            Ok(()) => {
+                if image_format_prop.image_format_properties.max_extent.width < width as u32
+                    || image_format_prop.image_format_properties.max_extent.height < height as u32
+                {
+                    log::debug!(
+                        "modifier {:?} not supported for size {}x{} (max extents {}x{})",
+                        modifier,
+                        width,
+                        height,
+                        image_format_prop.image_format_properties.max_extent.width,
+                        image_format_prop.image_format_properties.max_extent.height
                     );
-                    continue 'outer;
+                    continue; // modifier not supported for this size
                 }
+                #[cfg(not(ffmpeg_8_0))]
+                for m in &drm_modifier_props {
+                    if m.drm_format_modifier == modifier.0 && m.drm_format_modifier_plane_count > 1
+                    {
+                        log::warn!(
+                            "ffmpeg < 8.0 buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes), skipping",
+                            m.drm_format_modifier_plane_count
+                        );
+                        continue 'outer;
+                    }
+                }
+                modifiers_filtered.push(*modifier);
             }
-
-            modifiers_filtered.push(*modifier);
+            Err(e) => warn!(
+                "vkGetPhysicalDeviceImageFormatProperties2 failed for format={pixfmt_vk:?} modifier={modifier:?}: {e:?}"
+            ),
         }
     }
     modifiers_filtered
