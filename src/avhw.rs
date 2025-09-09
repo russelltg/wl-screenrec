@@ -228,6 +228,7 @@ fn vk_filter_drm_modifiers(
 ) -> Vec<DrmModifier> {
     use ash::vk;
 
+    #[cfg(not(ffmpeg_8_0))]
     let drm_modifier_props = get_drm_format_modifier_properties(&inst, phys_dev, pixfmt_vk);
 
     let mut modifiers_filtered: Vec<DrmModifier> = Vec::new();
@@ -263,9 +264,10 @@ fn vk_filter_drm_modifiers(
                 continue; // modifier not supported for this size
             }
 
+            #[cfg(not(ffmpeg_8_0))]
             for m in &drm_modifier_props {
                 if m.drm_format_modifier == modifier.0 && m.drm_format_modifier_plane_count > 1 {
-                    log::warn!("ffmpeg is buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes). I have submitted a patch to fix this, hopefully it will be merged soon.", 
+                    log::warn!("ffmpeg < 8.0 buggy and does not support multi-plane modifier export (modifier {modifier:?} has {} planes), skipping", 
                             m.drm_format_modifier_plane_count);
                     continue 'outer;
                 }
