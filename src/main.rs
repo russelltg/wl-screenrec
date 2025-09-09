@@ -1808,7 +1808,7 @@ impl EncState {
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         let mut hw_device_ctx = if args.vulkan {
-            error!("Vulkan is buggy and isn't known to work on any platform. Do not report bugs.");
+            error!("Vulkan is buggy and isn't known to work well yet. See https://github.com/russelltg/wl-screenrec/issues/95");
 
             #[allow(unreachable_code)]
             {
