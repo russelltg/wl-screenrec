@@ -503,6 +503,7 @@ struct DrmModifier(u64);
 
 impl DrmModifier {
     const LINEAR: DrmModifier = DrmModifier(0);
+    const INVALID: DrmModifier = DrmModifier(0xffffffffffffff); 
 }
 
 impl fmt::Debug for DrmModifier {
@@ -1460,7 +1461,9 @@ impl<S: CaptureSource + 'static> State<S> {
                 DrmFourcc::Xrgb2101010,
             ] {
                 let find = capture_formats.iter().find(|p| {
-                    p.fourcc == preferred_format && p.modifiers.contains(&DrmModifier::LINEAR)
+                    p.fourcc == preferred_format
+                        && (p.modifiers.contains(&DrmModifier::LINEAR)
+                            || p.modifiers.contains(&DrmModifier::INVALID)) // NVidia seems to only report INVALID & tiled formats, not LINEAR...
                 });
 
                 if let Some(find) = find {
