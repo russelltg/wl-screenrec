@@ -160,6 +160,11 @@ impl AvHwDevCtx {
                         height,
                     );
 
+                    if modifiers_filtered.is_empty() {
+                        error!("no supported modifiers found for vk format {pixfmt_vk:?}");
+                        return Err(ffmpeg::Error::InvalidData);
+                    }
+
                     let mut vk_bufs = AvHwDevCtxVulkanBuffers::new(
                         modifiers_filtered.into_boxed_slice(),
                         pixfmt_vk,
