@@ -267,6 +267,12 @@ fn vk_filter_drm_modifiers(
             )
         } {
             Ok(()) => {
+                log::debug!(
+                    "modifier {:?} supported for format {pixfmt_vk:?} with props {:?}",
+                    modifier,
+                    image_format_prop
+                );
+
                 if image_format_prop.image_format_properties.max_extent.width < width as u32
                     || image_format_prop.image_format_properties.max_extent.height < height as u32
                 {
