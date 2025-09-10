@@ -259,6 +259,7 @@ fn vk_filter_drm_modifiers(
                 phys_dev,
                 &vk::PhysicalDeviceImageFormatInfo2::default()
                     .format(pixfmt_vk)
+                    .ty(vk::ImageType::TYPE_2D)
                     .usage(usage)
                     .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
                     .push_next(&mut drm_info),
