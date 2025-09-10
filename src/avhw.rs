@@ -26,6 +26,11 @@ pub enum Usage {
     Enc,
 }
 
+pub enum Tiling<'a> {
+    Optimal,
+    Drm(&'a [DrmModifier]),
+}
+
 impl AvHwDevCtx {
     pub fn new_libva(dri_device: &Path) -> Result<Self, ffmpeg::Error> {
         unsafe {
@@ -104,7 +109,7 @@ impl AvHwDevCtx {
         pixfmt: Pixel,
         width: i32,
         height: i32,
-        modifiers: &[DrmModifier],
+        tiling: Tiling,
         _usage: Usage,
     ) -> Result<AvHwFrameCtx, ffmpeg::Error> {
         unsafe {
@@ -139,6 +144,8 @@ impl AvHwDevCtx {
                         vk_hwctx.inst,
                     );
 
+                    let pixfmt_vk = vkfmt_from_pixfmt(pixfmt)?;
+
                     let vk_usage = match _usage {
                         Usage::Capture => {
                             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
@@ -149,30 +156,39 @@ impl AvHwDevCtx {
                         }
                     };
 
-                    let pixfmt_vk = vkfmt_from_pixfmt(pixfmt)?;
-                    let modifiers_filtered = vk_filter_drm_modifiers(
-                        inst,
-                        vk_hwctx.phys_dev,
-                        pixfmt_vk,
-                        vk_usage,
-                        modifiers,
-                        width,
-                        height,
-                    );
+                    let (modifiers_filtered, tiling) = match tiling {
+                        Tiling::Optimal => (None, vk::ImageTiling::OPTIMAL),
+                        Tiling::Drm(modifiers) => {
+                            let modifiers_filtered = vk_filter_drm_modifiers(
+                                inst,
+                                vk_hwctx.phys_dev,
+                                pixfmt_vk,
+                                vk_usage,
+                                modifiers,
+                                width,
+                                height,
+                            );
 
-                    if modifiers_filtered.is_empty() {
-                        error!("no supported modifiers found for vk format {pixfmt_vk:?}");
-                        return Err(ffmpeg::Error::InvalidData);
-                    }
+                            if modifiers_filtered.is_empty() {
+                                error!("no supported modifiers found for vk format {pixfmt_vk:?}");
+                                return Err(ffmpeg::Error::InvalidData);
+                            }
+
+                            (
+                                Some(modifiers_filtered),
+                                vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT,
+                            )
+                        }
+                    };
 
                     let mut vk_bufs = AvHwDevCtxVulkanBuffers::new(
-                        modifiers_filtered.into_boxed_slice(),
+                        modifiers_filtered.map(|mods| mods.into_boxed_slice()),
                         pixfmt_vk,
                     );
 
                     let vk_ptr = &mut *(hwframe_casted.hwctx as *mut AVVulkanFramesContext);
 
-                    vk_ptr.tiling = vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT;
+                    vk_ptr.tiling = tiling;
                     vk_ptr.usage = vk_usage;
                     vk_ptr.create_pnext = vk_bufs.as_mut().chain_ptr();
 
@@ -182,7 +198,9 @@ impl AvHwDevCtx {
                 #[cfg(not(feature = "experimental-vulkan"))]
                 panic!("vulkan requested but built without vulkan support")
             } else {
-                if !modifiers.contains(&DrmModifier::LINEAR) {
+                if let Tiling::Drm(modifiers) = tiling
+                    && !modifiers.contains(&DrmModifier::LINEAR)
+                {
                     error!("unknown how to request non-linear frames in vaapi");
                 }
                 av_hwframe_ctx_init(hwframe)
@@ -348,7 +366,7 @@ fn get_drm_format_modifier_properties(
 #[cfg(feature = "experimental-vulkan")]
 struct AvHwDevCtxVulkanBuffers {
     drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT<'static>, // points to _image_fmt_list_info & _vk_modifiers
-    vk_modifiers: Pin<Box<[DrmModifier]>>,
+    vk_modifiers: Option<Pin<Box<[DrmModifier]>>>,
     image_fmt_list_info: ash::vk::ImageFormatListCreateInfo<'static>, // points to _image_fmt_list_info_fmts
     image_fmt_list_info_fmts: [ash::vk::Format; 1],
     _pin: std::marker::PhantomPinned, // to make this struct !Unpin
@@ -356,10 +374,13 @@ struct AvHwDevCtxVulkanBuffers {
 
 #[cfg(feature = "experimental-vulkan")]
 impl AvHwDevCtxVulkanBuffers {
-    pub fn new(modifiers_filtered: Box<[DrmModifier]>, pixfmt: ash::vk::Format) -> Pin<Box<Self>> {
+    pub fn new(
+        modifiers_filtered: Option<Box<[DrmModifier]>>,
+        pixfmt: ash::vk::Format,
+    ) -> Pin<Box<Self>> {
         let mut vk = Box::pin(AvHwDevCtxVulkanBuffers {
             drm_info: ash::vk::ImageDrmFormatModifierListCreateInfoEXT::default(),
-            vk_modifiers: Pin::new(modifiers_filtered),
+            vk_modifiers: modifiers_filtered.map(Pin::new),
             image_fmt_list_info: ash::vk::ImageFormatListCreateInfo::default(),
             image_fmt_list_info_fmts: [pixfmt],
             _pin: std::marker::PhantomPinned,
@@ -373,16 +394,22 @@ impl AvHwDevCtxVulkanBuffers {
             vk.image_fmt_list_info.view_format_count = vk.image_fmt_list_info_fmts.len() as u32;
             vk.image_fmt_list_info.p_view_formats = vk.image_fmt_list_info_fmts.as_ptr();
 
-            vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
-            vk.drm_info.drm_format_modifier_count = vk.vk_modifiers.len() as u32;
-            vk.drm_info.p_drm_format_modifiers = vk.vk_modifiers.as_ptr() as *const _;
+            if let Some(ref vk_modifiers) = vk.vk_modifiers {
+                vk.drm_info.p_next = <*mut _>::cast(&mut vk.image_fmt_list_info);
+                vk.drm_info.drm_format_modifier_count = vk_modifiers.len() as u32;
+                vk.drm_info.p_drm_format_modifiers = vk_modifiers.as_ptr() as *const _;
+            }
         }
         vk
     }
 
     pub fn chain_ptr(self: std::pin::Pin<&mut Self>) -> *mut c_void {
-        // drm_info is the beginning of the chain
-        &self.as_ref().drm_info as *const _ as *mut _
+        // drm_info is the beginning of the chain, unless we are are just using OPTIMAL tiling
+        if self.vk_modifiers.is_some() {
+            &self.as_ref().drm_info as *const _ as *mut _
+        } else {
+            &self.as_ref().image_fmt_list_info as *const _ as *mut _
+        }
     }
 }
 
