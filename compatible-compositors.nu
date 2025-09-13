@@ -1,20 +1,18 @@
 #!/usr/bin/env nu
 
-if "query" not-in (plugin list).name {
-	# `nu_plugin_query` is an official plugin distibuted as part of nushell.
-	# It should be installed in the same folder as the `nu` binary, and therefore
-	# also be in path
-	plugin add $"($nu.current-exe | path dirname)/nu_plugin_query"
-	# plugin add (which nu_plugin_query).path
-}
-
 plugin use query
 
-let protocols = [[name, url];
+let and_protocols = [[name, url];
 	["linux-dmabuf-v1" "https://wayland.app/protocols/linux-dmabuf-v1"]
-	["wlr-screencopy-unstable-v1" "https://wayland.app/protocols/wlr-screencopy-unstable-v1"]
 	["xdg-output-unstable-v1" "https://wayland.app/protocols/xdg-output-unstable-v1"]
 ]
+
+let or_protocols = [[name, url];
+	["wlr-screencopy-unstable-v1" "https://wayland.app/protocols/wlr-screencopy-unstable-v1"]
+	["ext-image-copy-capture-v1" "https://wayland.app/protocols/ext-image-copy-capture-v1"]
+]
+
+let protocols = $and_protocols | append $or_protocols
 
 let known_compositors = {
 	Mutter: "https://mutter.gnome.org/"
@@ -29,6 +27,9 @@ let known_compositors = {
 	Jay: "https://github.com/mahkoh/jay"
 	Labwc: "https://labwc.github.io/"
 	Treeland: "https://github.com/linuxdeepin/treeland"
+	Cage: "https://www.hjdskes.nl/projects/cage/"
+	Louvre: "https://github.com/CuarzoSoftware/Louvre"
+	Wayfire: "https://wayfire.org/"
 }
 
 $protocols | par-each {|protocol| 
@@ -43,11 +44,16 @@ $protocols | par-each {|protocol|
 		| flatten
 		| each { if $in == "x" { false } else { true } }
 
-	$compositors | merge ($supported | wrap $protocol.name)
+
+	let ret = $compositors | merge ($supported | wrap $protocol.name)
+	#print $ret
+	$ret
 }
 | reduce {|it, acc| $it | join $acc compositor } | reject version_ | reject version_ # Unclear to me why these `version_` columns are added by `join`
 | insert supported {|row|
-	$protocols.name | each { |protocol| $row | get $protocol } | all { |supported| $supported == true }
+	let prot_and = $and_protocols.name | each { |protocol| $row | get $protocol } | all { |supported| $supported == true }
+	let prot_or = $or_protocols.name | each { |protocol| $row | get $protocol } | any { |supported| $supported == true }
+	$prot_and and $prot_or
 }
 | where supported
 | select compositor version
@@ -55,7 +61,7 @@ $protocols | par-each {|protocol|
 | update compositor { |row|
 	let url = try { $known_compositors | get $row.compositor }
 	if $url == null {
-		error make {msg: $"Unkown compositor ($row.compositor). Wayland Explorer probably got updated with a new compositor. Add it to \$known_compositors in this script (path self)"}
+		error make {msg: $"Unkown compositor ($row.compositor). Wayland Explorer probably got updated with a new compositor. Add it to \$known_compositors in this script"}
 		$"($row.compositor)"
 	} else {
 		$"[($row.compositor)]\(($url)\)"
