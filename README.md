@@ -11,12 +11,28 @@ Open an issue if something is not working, I'm happy to take a look.
 
 # System Requirements
 
-* wayland compositor supporting the following protocols:
+* Wayland compositor supporting the following protocols:
   * [`wlr-screencopy-unstable-v1`](https://wayland.app/protocols/wlr-screencopy-unstable-v1) OR [`ext-image-copy-capture-v1`](https://wayland.app/protocols/ext-image-copy-capture-v1)
   * [`linux-dmabuf-v1`](https://wayland.app/protocols/linux-dmabuf-v1)
   * [`xdg-output-unstable-v1`](https://wayland.app/protocols/xdg-output-unstable-v1)
+    
+    These compositors all meet this criteria:
+    <!-- Generated using `./compatible-compositors.nu` -->
 
-   [Sway](https://swaywm.org/), [Hyprland](https://hyprland.org/), and [Wayfire](https://wayfire.org/) all meet this criteria.
+    | compositor                                          | version  |
+    | --------------------------------------------------- | -------- |
+    | [Cage](https://www.hjdskes.nl/projects/cage/)       | `0.2.0`  |
+    | [COSMIC](https://system76.com/cosmic/)              | `...`    |
+    | [Hyprland](https://hyprland.org/)                   | `0.48`   |
+    | [Jay](https://github.com/mahkoh/jay)                | `1.11.0` |
+    | [Labwc](https://labwc.github.io/)                   | `0.9.0`  |
+    | [Louvre](https://github.com/CuarzoSoftware/Louvre)  | `2.14.1` |
+    | [Mir](https://github.com/canonical/mir)             | `2.19`   |
+    | [niri](https://github.com/YaLTeR/niri)              | `25.08`  |
+    | [Sway](https://swaywm.org/)                         | `1.11`   |
+    | [Treeland](https://github.com/linuxdeepin/treeland) | `0.6.1`  |
+    | [Wayfire](https://wayfire.org/)                     | `0.9.0`  |
+
 * [`vaapi`](https://01.org/temp-linuxgraphics/community/vaapi) encode support, consult your distribution for how to set this up. Known good configurations:
   * Intel iGPUs
   * Radeon GPUs[^1]
@@ -106,7 +122,7 @@ wl-screenrec -g "0,0 128x128" # manual region
 Capture 444 video (no pixel format compression):
 
 > NOTE: Look at `vainfo -a` to see your supported pixel formats. Support is very
-> hardware-dependent. For example, on my machine only HEVC suports 444 formats, and
+> hardware-dependent. For example, on my machine only HEVC supports 444 formats, and
 > all of 8-bit RGB formats didn't work for whatever reason.
 
 ```bash
