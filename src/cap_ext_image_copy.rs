@@ -5,9 +5,7 @@ use drm::{buffer::DrmFourcc, node::DrmNode};
 use libc::dev_t;
 use log::{debug, warn};
 use log_once::warn_once;
-use wayland_client::{
-    Dispatch, Proxy, QueueHandle, globals::GlobalList, protocol::wl_output::WlOutput,
-};
+use wayland_client::{Dispatch, Proxy, QueueHandle, globals::GlobalList};
 use wayland_protocols::ext::{
     image_capture_source::v1::client::{
         ext_foreign_toplevel_image_capture_source_manager_v1::ExtForeignToplevelImageCaptureSourceManagerV1,

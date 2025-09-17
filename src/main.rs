@@ -58,11 +58,13 @@ use wayland_client::{
     },
 };
 use wayland_protocols::{
-    ext::foreign_toplevel_list::v1::client::{
-        ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
-        ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+    ext::{
+        foreign_toplevel_list::v1::client::{
+            ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+            ext_foreign_toplevel_list_v1::{self, EVT_TOPLEVEL_OPCODE, ExtForeignToplevelListV1},
+        },
+        image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     },
-    ext::image_capture_source::v1::client::ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     wp::linux_dmabuf::zv1::client::{
         zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1},
         zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
@@ -274,6 +276,21 @@ pub struct Args {
 enum WhatToCapture {
     Output(WlOutput),
     Toplevel(ExtForeignToplevelHandleV1),
+}
+
+#[derive(Clone)]
+enum WhatToEncode {
+    OutputRoi(OutputInfo, Rect), // roi in screen coord
+    Toplevel(ExtForeignToplevelHandleV1),
+}
+
+impl From<WhatToEncode> for WhatToCapture {
+    fn from(value: WhatToEncode) -> Self {
+        match value {
+            WhatToEncode::OutputRoi(output, _) => WhatToCapture::Output(output.output),
+            WhatToEncode::Toplevel(toplevel) => WhatToCapture::Toplevel(toplevel),
+        }
+    }
 }
 
 trait CaptureSource: Sized {
@@ -623,7 +640,6 @@ struct ProbingOutputsState {
 struct CompleteState<S> {
     enc: EncState,
     cap: S,
-    output: OutputInfo,
     output_went_away: bool,
 }
 
@@ -636,9 +652,8 @@ struct OutputWentAwayState {
 enum EncConstructionStage<S> {
     ProbingOutputs(ProbingOutputsState),
     EverythingButFormat {
-        roi: Rect,
         cap: S,
-        output: OutputInfo,
+        what_to_enc: WhatToEncode,
         history_already_triggered: bool,
     },
     Complete(CompleteState<S>),
@@ -755,9 +770,18 @@ impl<S: CaptureSource + 'static> Dispatch<WlRegistry, GlobalListContents> for St
         debug!("wl-registry event: {event:?}");
         match event {
             Event::GlobalRemove { name } => {
-                if let EncConstructionStage::Complete(c) = &mut state.enc {
-                    if c.output.global_name == name {
-                        c.output_went_away = true;
+                if let EncConstructionStage::Complete(CompleteState {
+                    enc:
+                        EncState {
+                            enc: WhatToEncode::OutputRoi(output, _),
+                            ..
+                        },
+                    output_went_away,
+                    ..
+                }) = &mut state.enc
+                {
+                    if output.global_name == name {
+                        *output_went_away = true;
                     }
                 }
             }
@@ -910,9 +934,9 @@ impl<S: CaptureSource> Dispatch<ExtForeignToplevelHandleV1, ()> for State<S> {
         state: &mut Self,
         proxy: &ExtForeignToplevelHandleV1,
         event: <ExtForeignToplevelHandleV1 as Proxy>::Event,
-        data: &(),
-        conn: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
     ) {
         match event {
             ext_foreign_toplevel_handle_v1::Event::Closed => {}
@@ -929,30 +953,22 @@ impl<S: CaptureSource> Dispatch<ExtForeignToplevelHandleV1, ()> for State<S> {
 
 impl<S: CaptureSource + 'static> Dispatch<ExtForeignToplevelListV1, ()> for State<S> {
     fn event(
-        state: &mut Self,
-        proxy: &ExtForeignToplevelListV1,
+        _state: &mut Self,
+        _proxy: &ExtForeignToplevelListV1,
         event: <ExtForeignToplevelListV1 as Proxy>::Event,
-        data: &(),
-        conn: &Connection,
-        qhandle: &QueueHandle<Self>,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
     ) {
         match event {
-            ext_foreign_toplevel_list_v1::Event::Toplevel { toplevel } => {}
+            ext_foreign_toplevel_list_v1::Event::Toplevel { .. } => {}
             ext_foreign_toplevel_list_v1::Event::Finished => {}
             _ => todo!(),
         }
     }
 
     event_created_child!(State<S>, ExtForeignToplevelListV1, [
-        // there can be multiple lines if this interface has multiple object-creating event
-        EVT_CREATE_BAR => (ExtForeignToplevelHandleV1, ()),
-    //  ~~~~~~~~~~~~~~     ~~~~~  ~~~~~~~~~~~~~~~~~~
-    //    |                  |      |
-    //    |                  |      +-- an expression whose evaluation produces the
-    //    |                  |          user data value
-    //    |                  +-- the type of the newly created object
-    //    +-- the opcode of the event that creates a new object, constants for those are
-    //        generated alongside the `WlFoo` type in the `wl_foo` module
+        EVT_TOPLEVEL_OPCODE => (ExtForeignToplevelHandleV1, ()),
     ]);
 }
 
@@ -1139,13 +1155,12 @@ impl<S: CaptureSource + 'static> State<S> {
         let capture_pixfmt = dmabuf_to_av(new_format.fourcc);
 
         // make sure bounds are still valid, as size may have changed
-        cs.enc.roi_screen_coord = cs
-            .enc
-            .roi_screen_coord
-            .fit_inside_bounds(new_format.width, new_format.height);
+        if let WhatToEncode::OutputRoi(_, roi) = &mut cs.enc.enc {
+            *roi = roi.fit_inside_bounds(new_format.width, new_format.height);
 
-        if cs.enc.roi_screen_coord.w == 0 || cs.enc.roi_screen_coord.h == 0 {
-            bail!("new capture surface is zero-sized, bailing");
+            if roi.w == 0 || roi.h == 0 {
+                bail!("new capture surface is zero-sized, bailing");
+            }
         }
 
         cs.enc.frames_rgb = cs.enc.hw_device_ctx
@@ -1176,12 +1191,17 @@ impl<S: CaptureSource + 'static> State<S> {
         }
         cs.enc.process_ready();
 
+        let (w, h) = match &cs.enc.enc {
+            WhatToEncode::OutputRoi(_, rect) => (rect.w, rect.h),
+            WhatToEncode::Toplevel(_) => (new_format.width, new_format.height),
+        };
+
         // create a new encoder
         // TODO: correct scaling
         let mut frames_yuv = cs.enc.hw_device_ctx
-            .create_frame_ctx(enc_pixfmt_av, cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h, Tiling::Optimal, Usage::Enc)
+            .create_frame_ctx(enc_pixfmt_av, w, h, Tiling::Optimal, Usage::Enc)
             .with_context(|| {
-                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {}x{}", cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h)
+                format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {}x{}", w, h)
             })?;
 
         let encoder = cs.enc.enc_video.codec().unwrap();
@@ -1196,8 +1216,8 @@ impl<S: CaptureSource + 'static> State<S> {
             &self.args,
             cs.enc.enc_pixfmt,
             &encoder,
-            (cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h),
-            framerate,
+            (w, h),
+            Some(framerate),
             global_header,
             &mut cs.enc.hw_device_ctx,
             &mut frames_yuv,
@@ -1206,12 +1226,16 @@ impl<S: CaptureSource + 'static> State<S> {
         cs.enc.enc_video = enc.open_with(cs.enc.enc_video_options.clone())?;
         cs.enc.enc_video_has_been_fed_any_frames = false;
 
+        let crop_scale = match &cs.enc.enc {
+            WhatToEncode::OutputRoi(_, roi) => CropScale::RectScale(*roi, (w, h)),
+            WhatToEncode::Toplevel(_) => CropScale::Full,
+        };
+
         let (filter, filter_timebase) = video_filter(
             &mut cs.enc.frames_rgb,
             cs.enc.enc_pixfmt,
             (new_format.width, new_format.height),
-            cs.enc.roi_screen_coord,
-            (cs.enc.roi_screen_coord.w, cs.enc.roi_screen_coord.h),
+            crop_scale,
             cs.enc.transform,
             self.args.vulkan,
         );
@@ -1297,10 +1321,10 @@ impl<S: CaptureSource + 'static> State<S> {
                             WhatToCapture::Output(info.output.clone()),
                         )
                         .unwrap();
+
                         self.enc = EncConstructionStage::Complete(CompleteState {
                             enc,
                             cap,
-                            output: info,
                             output_went_away: false,
                         });
                         self.queue_alloc_frame(qhandle);
@@ -1336,36 +1360,46 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let enabled_outputs: Vec<_> = p.outputs.iter().flat_map(|(_, o)| o).collect();
 
-        let (output, roi) = match (self.args.geometry, self.args.output.as_str()) {
-            (None, "") => {
-                // default case, capture whole monitor
-                if enabled_outputs.len() != 1 {
-                    eprintln!(
-                        "multiple enabled displays and no --geometry or --output supplied, bailing"
-                    );
-                    self.errored = true;
-                    return;
-                }
+        let what_to_enc = if !self.args.toplevel.is_empty() {
+            let toplevel = self
+                .toplevels
+                .iter()
+                .find(|(name, _)| *name == self.args.toplevel)
+                .unwrap()
+                .1
+                .clone();
+            WhatToEncode::Toplevel(toplevel)
+        } else {
+            let (output, roi) = match (self.args.geometry, self.args.output.as_str()) {
+                (None, "") => {
+                    // default case, capture whole monitor
+                    if enabled_outputs.len() != 1 {
+                        eprintln!(
+                            "multiple enabled displays and no --geometry or --output supplied, bailing"
+                        );
+                        self.errored = true;
+                        return;
+                    }
 
-                let output = enabled_outputs[0];
-                (output, Rect::new((0, 0), output.size_screen_space()))
-            }
-            (None, disp) => {
-                // --output but no --geometry
-                if let Some(&output) = enabled_outputs.iter().find(|i| i.name == disp) {
+                    let output = enabled_outputs[0];
                     (output, Rect::new((0, 0), output.size_screen_space()))
-                } else {
-                    eprintln!("display {disp} not found, bailing");
-                    self.errored = true;
-                    return;
                 }
-            }
-            (Some((x, y, w, h)), "") => {
-                let w = w as i32;
-                let h = h as i32;
-                // --geometry but no --output
-                if let Some(&output) = enabled_outputs.iter().find(|i| {
-                    x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
+                (None, disp) => {
+                    // --output but no --geometry
+                    if let Some(&output) = enabled_outputs.iter().find(|i| i.name == disp) {
+                        (output, Rect::new((0, 0), output.size_screen_space()))
+                    } else {
+                        eprintln!("display {disp} not found, bailing");
+                        self.errored = true;
+                        return;
+                    }
+                }
+                (Some((x, y, w, h)), "") => {
+                    let w = w as i32;
+                    let h = h as i32;
+                    // --geometry but no --output
+                    if let Some(&output) = enabled_outputs.iter().find(|i| {
+                        x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
                         y >= i.loc.1 && y + h <= i.loc.1 + i.logical_size.1 // y within
                 }) {
                     (
@@ -1405,21 +1439,10 @@ impl<S: CaptureSource + 'static> State<S> {
 
         info!("Using output {}", output.name);
 
-        dbg!(&self.toplevels);
+            WhatToEncode::OutputRoi(output.clone(), roi)
+        };
 
-        let cap = match S::new(
-            &self.gm,
-            qhandle,
-            // WhatToCapture::Output(output.output.clone())
-            WhatToCapture::Toplevel(
-                self.toplevels
-                    .iter()
-                    .find(|(name, _)| name == "Alacritty")
-                    .unwrap()
-                    .1
-                    .clone(),
-            ),
-        ) {
+        let cap = match S::new(&self.gm, qhandle, what_to_enc.clone().into()) {
             Ok(cap) => cap,
             Err(err) => {
                 eprintln!("failed to create capture state: {err}");
@@ -1428,9 +1451,8 @@ impl<S: CaptureSource + 'static> State<S> {
             }
         };
         self.enc = EncConstructionStage::EverythingButFormat {
-            roi,
             cap,
-            output: output.clone(),
+            what_to_enc,
             history_already_triggered: p.history_already_triggered,
         };
 
@@ -1488,7 +1510,6 @@ impl<S: CaptureSource + 'static> State<S> {
     fn on_copy_fail(&mut self, qhandle: &QueueHandle<Self>) {
         let CompleteState {
             output_went_away,
-            output,
             cap,
             enc,
         } = self.enc.unwrap();
@@ -1507,35 +1528,43 @@ impl<S: CaptureSource + 'static> State<S> {
         } else {
             panic!("on_copy_fail called in strange state");
         }
-
-        if *output_went_away {
-            info!(
-                "copy failed because output {} went away. Waiting for it to come back...",
-                output.name
-            );
-            let waiting_for_output_name = output.name.clone();
-            let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate).take_enc();
-
-            let mut owa = OutputWentAwayState {
-                enc,
-                waiting_for_output_name,
-                partial_outputs: Default::default(),
-            };
-            for g in self.gm.contents().clone_list() {
-                if g.interface == WlOutput::interface().name {
-                    owa.new_wl_output(self.gm.registry(), &self.xdg_output_manager, g, qhandle);
-                }
-            }
-            self.enc = EncConstructionStage::OutputWentAway(owa);
-        } else if enc.format_change {
+        if enc.format_change {
             enc.format_change = false;
             debug!(
                 "failed transfer, but just did a format change so not surprising. trying to capture a new frame..."
             );
+
             self.queue_alloc_frame(qhandle);
+            return;
+        }
+
+        if let WhatToEncode::OutputRoi(output, _) = &enc.enc {
+            if *output_went_away {
+                info!(
+                    "copy failed because output {} went away. Waiting for it to come back...",
+                    output.name
+                );
+                let waiting_for_output_name = output.name.clone();
+                let enc =
+                    mem::replace(&mut self.enc, EncConstructionStage::Intermediate).take_enc();
+
+                let mut owa = OutputWentAwayState {
+                    enc,
+                    waiting_for_output_name,
+                    partial_outputs: Default::default(),
+                };
+                for g in self.gm.contents().clone_list() {
+                    if g.interface == WlOutput::interface().name {
+                        owa.new_wl_output(self.gm.registry(), &self.xdg_output_manager, g, qhandle);
+                    }
+                }
+                self.enc = EncConstructionStage::OutputWentAway(owa);
+            } else {
+                error!("unknown copy fail reason, trying to capture a new frame...");
+                self.queue_alloc_frame(qhandle);
+            }
         } else {
-            error!("unknown copy fail reason, trying to capture a new frame...");
-            self.queue_alloc_frame(qhandle);
+            unimplemented!()
         }
     }
 
@@ -1599,17 +1628,18 @@ impl<S: CaptureSource + 'static> State<S> {
 
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::EverythingButFormat {
-                output,
-                roi,
+                what_to_enc: output,
                 cap,
                 history_already_triggered,
             } => {
                 let enc = match EncState::new(
                     &self.args,
                     selected_format,
-                    output.refresh,
-                    output.transform,
-                    roi,
+                    match &output {
+                        WhatToEncode::OutputRoi(output_info, _) => Some(output_info.refresh),
+                        WhatToEncode::Toplevel(_) => None, // no way to know the framerate here
+                    },
+                    output.clone(),
                     history_already_triggered,
                     dri_device,
                 ) {
@@ -1624,7 +1654,6 @@ impl<S: CaptureSource + 'static> State<S> {
                 self.enc = EncConstructionStage::Complete(CompleteState {
                     enc,
                     cap,
-                    output,
                     output_went_away: false,
                 });
             }
@@ -1683,7 +1712,7 @@ struct EncState {
     selected_format: DmabufFormat,
     hw_device_ctx: AvHwDevCtx,
     enc_pixfmt: EncodePixelFormat,
-    roi_screen_coord: Rect,
+    enc: WhatToEncode,
     transform: Transform,
     enc_video_options: dictionary::Owned<'static>,
     format_change: bool,
@@ -1723,7 +1752,7 @@ fn make_video_params(
     enc_pix_fmt: EncodePixelFormat,
     codec: &ffmpeg::Codec,
     (encode_w, encode_h): (i32, i32),
-    framerate: Rational,
+    framerate: Option<Rational>,
     global_header: bool,
     hw_device_ctx: &mut AvHwDevCtx,
     frames_yuv: &mut AvHwFrameCtx,
@@ -1738,7 +1767,7 @@ fn make_video_params(
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
     enc.set_time_base(Rational(1, 1_000_000_000));
-    enc.set_frame_rate(Some(framerate));
+    enc.set_frame_rate(framerate);
     if let Some(gop) = args.gop_size {
         enc.set_gop(gop);
     }
@@ -1866,9 +1895,8 @@ impl EncState {
     fn new(
         args: &Args,
         capture_format: DmabufFormat,
-        refresh: Rational,
-        transform: Transform,
-        roi_screen_coord: Rect, // roi in screen coordinates (0, 0 is screen upper left, which is not necessarily captured frame upper left)
+        refresh: Option<Rational>,
+        output: WhatToEncode,
         history_alreday_triggered: bool,
         dri_device: &Path,
     ) -> anyhow::Result<Self> {
@@ -1944,17 +1972,33 @@ impl EncState {
             .create_frame_ctx(dmabuf_to_av(capture_format.fourcc), capture_format.width, capture_format.height, Tiling::Drm(&capture_format.modifiers), Usage::Capture)
             .with_context(|| format!("Failed to create vaapi frame context for capture surfaces of format {capture_format:?}"))?;
 
-        let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
-            Some((x, y)) => (x as i32, y as i32),
-            None => (roi_screen_coord.w, roi_screen_coord.h),
+        let (roi, transform, (enc_w_screen_coord, enc_h_screen_coord)) = match &output {
+            WhatToEncode::OutputRoi(output_info, roi_screen_coord) => {
+                let (enc_w_screen_coord, enc_h_screen_coord) = match args.encode_resolution {
+                    Some((x, y)) => (x as i32, y as i32),
+                    None => (roi_screen_coord.w, roi_screen_coord.h),
+                };
+                (
+                    CropScale::RectScale(
+                        *roi_screen_coord,
+                        (enc_w_screen_coord, enc_h_screen_coord),
+                    ),
+                    output_info.transform,
+                    (enc_w_screen_coord, enc_h_screen_coord),
+                )
+            }
+            WhatToEncode::Toplevel(_) => (
+                CropScale::Full,
+                Transform::Normal,
+                (capture_format.width as i32, capture_format.height as i32),
+            ),
         };
 
         let (video_filter, filter_timebase) = video_filter(
             &mut frames_rgb,
             enc_pixfmt,
             (capture_format.width, capture_format.height),
-            roi_screen_coord,
-            (enc_w_screen_coord, enc_h_screen_coord),
+            roi,
             transform,
             args.vulkan, // xx enum
         );
@@ -2074,7 +2118,7 @@ impl EncState {
             vid_stream_idx,
             hw_device_ctx,
             enc_pixfmt,
-            roi_screen_coord,
+            enc: output,
             transform,
             enc_video_options,
             frames_rgb,
@@ -2297,12 +2341,16 @@ impl EncState {
     }
 }
 
+enum CropScale {
+    Full,
+    RectScale(Rect, (i32, i32)), // rect is roi in screen coordinates, (i32, i32) is encode resolution. Will be scaled if different size than the rect0.
+}
+
 fn video_filter(
     inctx: &mut AvHwFrameCtx,
     pix_fmt: EncodePixelFormat,
     (capture_width, capture_height): (i32, i32),
-    roi_screen_coord: Rect,                               // size (pixels)
-    (enc_w_screen_coord, enc_h_screen_coord): (i32, i32), // size (pixels) to encode. if not same as roi_{w,h}, the image will be scaled.
+    crop_scale: CropScale,
     transform: Transform,
     vulkan: bool,
 ) -> (filter::Graph, Rational) {
@@ -2390,19 +2438,29 @@ fn video_filter(
     // it seems intel's vaapi driver doesn't support transpose in RGB space, so we have to transpose
     // after the format conversion
     // which means we have to transform the crop to be in the *pre* transpose space
-    let Rect {
-        x: roi_x,
-        y: roi_y,
-        w: roi_w,
-        h: roi_h,
-    } = roi_screen_coord.screen_to_frame(capture_width, capture_height, transform);
+    let (crop, (enc_w, enc_h)) = match crop_scale {
+        CropScale::Full => ("".to_string(), (capture_width, capture_height)),
+        CropScale::RectScale(roi_screen_coord, (enc_w_screen_coord, enc_h_screen_coord)) => {
+            let Rect {
+                x: roi_x,
+                y: roi_y,
+                w: roi_w,
+                h: roi_h,
+            } = roi_screen_coord.screen_to_frame(capture_width, capture_height, transform);
 
-    // sanity check
-    assert!(roi_x >= 0, "{roi_x} < 0");
-    assert!(roi_y >= 0, "{roi_y} < 0");
+            // sanity check
+            assert!(roi_x >= 0, "{roi_x} < 0");
+            assert!(roi_y >= 0, "{roi_y} < 0");
 
-    let (enc_w, enc_h) =
-        transpose_if_transform_transposed((enc_w_screen_coord, enc_h_screen_coord), transform);
+            (
+                format!("crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,"),
+                transpose_if_transform_transposed(
+                    (enc_w_screen_coord, enc_h_screen_coord),
+                    transform,
+                ),
+            )
+        }
+    };
 
     if vulkan {
         g.output("in", 0)
@@ -2410,7 +2468,7 @@ fn video_filter(
             .input("out", 0)
             .unwrap()
             .parse(&format!(
-                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vulkan=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
+                "{crop}scale_vulkan=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
                 if let EncodePixelFormat::Vulkan(_) = pix_fmt {
                     ""
                 } else {
@@ -2427,7 +2485,7 @@ fn video_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
+            "{crop}scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
             if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
