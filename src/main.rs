@@ -140,8 +140,13 @@ pub struct Args {
     )]
     output: String,
 
-    #[clap(long, help = "which toplevel to capture", default_value = "", conflicts_with_all(["output", "geometry"]))]
-    toplevel: String,
+    #[clap(
+        long,
+        help = "which toplevel to capture. Format is `key=value`, where `key` can be `title`, `app-id`, or `foreign-toplevel-id`", 
+        conflicts_with_all(["output", "geometry"]),
+        value_parser=parse_toplevel_criteria,
+    )]
+    toplevel: Option<ToplevelCriteria>,
 
     #[clap(
         long,
@@ -344,6 +349,13 @@ enum LowPowerMode {
     Off,
 }
 
+#[derive(Clone, Debug)]
+enum ToplevelCriteria {
+    Title(String),
+    AppId(String),
+    ForeignToplevelId(String),
+}
+
 #[derive(Error, Debug)]
 enum ParseGeometryError {
     #[error("invalid integer")]
@@ -392,6 +404,31 @@ fn parse_size(size: &str) -> Result<(u32, u32), ParseGeometryError> {
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
     let seconds = arg.parse()?;
     Ok(std::time::Duration::from_secs(seconds))
+}
+
+fn parse_toplevel_criteria(arg: &str) -> Result<ToplevelCriteria, anyhow::Error> {
+    let (key, value) = arg
+        .split_once("=")
+        .ok_or_else(|| anyhow!("missing '=' in toplevel criteria"))?;
+
+    match key {
+        "title" => Ok(ToplevelCriteria::Title(value.to_string())),
+        "app-id" => Ok(ToplevelCriteria::AppId(value.to_string())),
+        "foreign-toplevel-id" => Ok(ToplevelCriteria::ForeignToplevelId(value.to_string())),
+        _ => Err(anyhow!("unknown toplevel criteria key {}", key)),
+    }
+}
+
+impl ToplevelCriteria {
+    fn matches(&self, info: &ToplevelInfo) -> bool {
+        match self {
+            ToplevelCriteria::Title(t) => Some(t) == info.title.as_ref(),
+            ToplevelCriteria::AppId(c) => Some(c) == info.app_id.as_ref(),
+            ToplevelCriteria::ForeignToplevelId(id) => {
+                Some(id) == info.foreign_toplevel_id.as_ref()
+            }
+        }
+    }
 }
 
 #[derive(clap::ValueEnum, Debug, Default, Clone, PartialEq, Eq)]
@@ -602,6 +639,13 @@ unsafe extern "C" {
     pub fn drmGetFormatModifierName(modifier: u64) -> *mut libc::c_char;
 }
 
+struct ToplevelInfo {
+    title: Option<String>,
+    app_id: Option<String>,
+    foreign_toplevel_id: Option<String>,
+    handle: ExtForeignToplevelHandleV1,
+}
+
 struct State<S: CaptureSource> {
     in_flight_surface: InFlightSurface<S>,
     dma: ZwpLinuxDmabufV1,
@@ -611,7 +655,7 @@ struct State<S: CaptureSource> {
     errored: bool,
     gm: GlobalList,
     xdg_output_manager: ZxdgOutputManagerV1,
-    toplevels: Vec<(String, ExtForeignToplevelHandleV1)>, // (name, _)
+    toplevels: HashMap<ObjectId, ToplevelInfo>,
 }
 
 enum InFlightSurface<S: CaptureSource> {
@@ -931,21 +975,34 @@ impl<S: CaptureSource> Dispatch<WlRegistry, ()> for State<S> {
 
 impl<S: CaptureSource> Dispatch<ExtForeignToplevelHandleV1, ()> for State<S> {
     fn event(
-        state: &mut Self,
+        state: &mut State<S>,
         proxy: &ExtForeignToplevelHandleV1,
         event: <ExtForeignToplevelHandleV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+        let entry = state
+            .toplevels
+            .entry(proxy.id())
+            .or_insert_with(|| ToplevelInfo {
+                handle: proxy.clone(),
+                title: None,
+                app_id: None,
+                foreign_toplevel_id: None,
+            });
         match event {
             ext_foreign_toplevel_handle_v1::Event::Closed => {}
             ext_foreign_toplevel_handle_v1::Event::Done => {}
-            ext_foreign_toplevel_handle_v1::Event::Title { .. } => {}
-            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
-                state.toplevels.push((app_id, proxy.clone()));
+            ext_foreign_toplevel_handle_v1::Event::Title { title } => {
+                entry.title = Some(title);
             }
-            ext_foreign_toplevel_handle_v1::Event::Identifier { .. } => {}
+            ext_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                entry.app_id = Some(app_id);
+            }
+            ext_foreign_toplevel_handle_v1::Event::Identifier { identifier } => {
+                entry.foreign_toplevel_id = Some(identifier);
+            }
             _ => todo!(),
         }
     }
@@ -1041,7 +1098,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 errored: false,
                 gm,
                 xdg_output_manager,
-                toplevels: Vec::new(),
+                toplevels: HashMap::new(),
             },
             queue,
         ))
@@ -1360,15 +1417,33 @@ impl<S: CaptureSource + 'static> State<S> {
 
         let enabled_outputs: Vec<_> = p.outputs.iter().flat_map(|(_, o)| o).collect();
 
-        let what_to_enc = if !self.args.toplevel.is_empty() {
-            let toplevel = self
+        let what_to_enc = if let Some(criteria) = &self.args.toplevel {
+            let matches: Vec<_> = self
                 .toplevels
                 .iter()
-                .find(|(name, _)| *name == self.args.toplevel)
-                .unwrap()
-                .1
-                .clone();
-            WhatToEncode::Toplevel(toplevel)
+                .filter(|(_, info)| criteria.matches(&info))
+                .collect();
+
+            if matches.is_empty() {
+                error!("no toplevel windows matched criteria {criteria:?}, bailing");
+                self.errored = true;
+                return;
+            }
+
+            if matches.len() > 1 {
+                error!(
+                    "multiple toplevel windows matched criteria {criteria:?} (titles were {}), using the first one",
+                    matches
+                        .iter()
+                        .filter_map(|(_, info)| info.title.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                self.errored = true;
+                return;
+            }
+
+            WhatToEncode::Toplevel(matches[0].1.handle.clone())
         } else {
             let (output, roi) = match (self.args.geometry, self.args.output.as_str()) {
                 (None, "") => {
