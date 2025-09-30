@@ -733,10 +733,10 @@ impl<S: CaptureSource + 'static> Dispatch<WlRegistry, GlobalListContents> for St
         debug!("wl-registry event: {event:?}");
         match event {
             Event::GlobalRemove { name } => {
-                if let EncConstructionStage::Complete(c) = &mut state.enc {
-                    if c.output.global_name == name {
-                        c.output_went_away = true;
-                    }
+                if let EncConstructionStage::Complete(c) = &mut state.enc
+                    && c.output.global_name == name
+                {
+                    c.output_went_away = true;
                 }
             }
             Event::Global {
@@ -744,19 +744,19 @@ impl<S: CaptureSource + 'static> Dispatch<WlRegistry, GlobalListContents> for St
                 interface,
                 version,
             } => {
-                if interface == WlOutput::interface().name {
-                    if let EncConstructionStage::OutputWentAway(owa) = &mut state.enc {
-                        owa.new_wl_output(
-                            proxy,
-                            &state.xdg_output_manager,
-                            Global {
-                                name,
-                                interface,
-                                version,
-                            },
-                            qhandle,
-                        );
-                    }
+                if interface == WlOutput::interface().name
+                    && let EncConstructionStage::OutputWentAway(owa) = &mut state.enc
+                {
+                    owa.new_wl_output(
+                        proxy,
+                        &state.xdg_output_manager,
+                        Global {
+                            name,
+                            interface,
+                            version,
+                        },
+                        qhandle,
+                    );
                 }
             }
             _ => todo!(),
@@ -1206,23 +1206,23 @@ impl<S: CaptureSource + 'static> State<S> {
                 self.start_if_output_probe_complete(qhandle);
             }
             EncConstructionStage::OutputWentAway(output_went_away_state) => {
-                if let Some(info) = complete_output {
-                    if info.name == output_went_away_state.waiting_for_output_name {
-                        info!(
-                            "output {} came back, continuing screenrecording..",
-                            info.name
-                        );
-                        let enc = mem::replace(&mut self.enc, EncConstructionStage::Intermediate)
-                            .take_enc();
-                        let cap = S::new(&self.gm, qhandle, info.output.clone()).unwrap();
-                        self.enc = EncConstructionStage::Complete(CompleteState {
-                            enc,
-                            cap,
-                            output: info,
-                            output_went_away: false,
-                        });
-                        self.queue_alloc_frame(qhandle);
-                    }
+                if let Some(info) = complete_output
+                    && info.name == output_went_away_state.waiting_for_output_name
+                {
+                    info!(
+                        "output {} came back, continuing screenrecording..",
+                        info.name
+                    );
+                    let enc =
+                        mem::replace(&mut self.enc, EncConstructionStage::Intermediate).take_enc();
+                    let cap = S::new(&self.gm, qhandle, info.output.clone()).unwrap();
+                    self.enc = EncConstructionStage::Complete(CompleteState {
+                        enc,
+                        cap,
+                        output: info,
+                        output_went_away: false,
+                    });
+                    self.queue_alloc_frame(qhandle);
                 }
             }
             _ => unreachable!(),
@@ -2124,10 +2124,10 @@ impl EncState {
     }
 
     fn flush(&mut self) {
-        if let Some(limit) = &mut self.fps_limit {
-            if let Some(f) = limit.flush() {
-                self.push(f);
-            }
+        if let Some(limit) = &mut self.fps_limit
+            && let Some(f) = limit.flush()
+        {
+            self.push(f);
         }
 
         self.flush_audio();
@@ -2420,11 +2420,11 @@ fn main() {
         );
         exit(1);
     }
-    if let Some(max_fps) = args.max_fps {
-        if max_fps <= 0. {
-            error!("`--max-fps` must be a positive and nonzero number");
-            exit(1);
-        }
+    if let Some(max_fps) = args.max_fps
+        && max_fps <= 0.
+    {
+        error!("`--max-fps` must be a positive and nonzero number");
+        exit(1);
     }
 
     let conn = match Connection::connect_to_env() {

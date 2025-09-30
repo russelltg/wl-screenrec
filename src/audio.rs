@@ -287,20 +287,19 @@ impl IncompleteAudioState {
         let ost_time_base = octx.stream(self.ost_stream_idx).unwrap().time_base();
 
         let mut fifo = None;
-        if let Some(codec) = self.enc_audio.codec() {
-            if !codec
+        if let Some(codec) = self.enc_audio.codec()
+            && !codec
                 .capabilities()
                 .contains(ffmpeg::codec::capabilities::Capabilities::VARIABLE_FRAME_SIZE)
-            {
-                fifo = Some(
-                    AudioFifo::new(
-                        self.enc_audio.format(),
-                        self.enc_audio.channel_layout().channels(),
-                        max(self.enc_audio.frame_size(), self.dec_audio.frame_size()) * 2,
-                    )
-                    .unwrap(),
-                );
-            }
+        {
+            fifo = Some(
+                AudioFifo::new(
+                    self.enc_audio.format(),
+                    self.enc_audio.channel_layout().channels(),
+                    max(self.enc_audio.frame_size(), self.dec_audio.frame_size()) * 2,
+                )
+                .unwrap(),
+            );
         }
 
         let (frame_sender, r) = channel();
