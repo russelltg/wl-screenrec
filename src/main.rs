@@ -1476,43 +1476,43 @@ impl<S: CaptureSource + 'static> State<S> {
                     if let Some(&output) = enabled_outputs.iter().find(|i| {
                         x >= i.loc.0 && x + w <= i.loc.0 + i.logical_size.0 && // x within
                         y >= i.loc.1 && y + h <= i.loc.1 + i.logical_size.1 // y within
-                }) {
-                    (
-                        output,
-                        Rect::new(
-                            (
-                                output.logical_to_pixel(x - output.loc.0),
-                                output.logical_to_pixel(y - output.loc.1),
+                    }) {
+                        (
+                            output,
+                            Rect::new(
+                                (
+                                    output.logical_to_pixel(x - output.loc.0),
+                                    output.logical_to_pixel(y - output.loc.1),
+                                ),
+                                (output.logical_to_pixel(w), output.logical_to_pixel(h)),
                             ),
-                            (output.logical_to_pixel(w), output.logical_to_pixel(h)),
-                        ),
-                    )
-                } else {
+                        )
+                    } else {
+                        eprintln!(
+                            "region {x},{y} {w}x{h} is not entirely within one output, bailing. Display rects are {}",
+                            enabled_outputs
+                                .iter()
+                                .map(|o| format!(
+                                    "{}: {},{} {}x{}",
+                                    o.name, o.loc.0, o.loc.1, o.logical_size.0, o.logical_size.1,
+                                ))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        );
+                        self.errored = true;
+                        return;
+                    }
+                }
+                (Some(_), _) => {
                     eprintln!(
-                        "region {x},{y} {w}x{h} is not entirely within one output, bailing. Display rects are {}",
-                        enabled_outputs
-                            .iter()
-                            .map(|o| format!(
-                                "{}: {},{} {}x{}",
-                                o.name, o.loc.0, o.loc.1, o.logical_size.0, o.logical_size.1,
-                            ))
-                            .collect::<Vec<_>>()
-                            .join("; ")
+                        "both --geometry and --output were passed, which is not allowed, bailing"
                     );
                     self.errored = true;
                     return;
                 }
-            }
-            (Some(_), _) => {
-                eprintln!(
-                    "both --geometry and --output were passed, which is not allowed, bailing"
-                );
-                self.errored = true;
-                return;
-            }
-        };
+            };
 
-        info!("Using output {}", output.name);
+            info!("Using output {}", output.name);
 
             WhatToEncode::OutputRoi(output.clone(), roi)
         };
