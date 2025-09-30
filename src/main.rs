@@ -1297,7 +1297,17 @@ impl<S: CaptureSource + 'static> State<S> {
                         ),
                     )
                 } else {
-                    eprintln!("region {x},{y} {w}x{h} is not entirely within one output, bailing",);
+                    eprintln!(
+                        "region {x},{y} {w}x{h} is not entirely within one output, bailing. Display rects are {}",
+                        enabled_outputs
+                            .iter()
+                            .map(|o| format!(
+                                "{}: {},{} {}x{}",
+                                o.name, o.loc.0, o.loc.1, o.logical_size.0, o.logical_size.1,
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
                     self.errored = true;
                     return;
                 }
