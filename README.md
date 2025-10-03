@@ -93,6 +93,7 @@ Before you do that though, make sure you have the following dependencies install
 - `libdrm-devel`
 - `freeglut-devel`
 - `clang`
+- `ffmpeg-free-devel`
 
 Also, make sure you install full ffmpeg and codecs for hardware acceleration support 
 via [RPM Fusion](https://rpmfusion.org/Howto/Multimedia).
