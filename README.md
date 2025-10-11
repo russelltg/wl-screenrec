@@ -225,4 +225,4 @@ Options:
 
 # Known issues
 
-- Cannot capture a region that spans more than one display. This is probably possible but quite difficult, espeicially with potential differences in refresh rate. Probably will never be supported.
+- Cannot capture a region that spans more than one display. This is probably possible but quite difficult, especially with potential differences in refresh rate. Probably will never be supported.
