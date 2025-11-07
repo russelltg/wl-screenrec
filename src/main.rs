@@ -13,7 +13,7 @@ use std::{
     path::Path,
     process::exit,
     ptr::null_mut,
-    str::from_utf8_unchecked,
+    str::from_utf8,
     time::{Duration, Instant},
 };
 
@@ -2247,29 +2247,34 @@ fn video_filter(
     }
 
     // sink
-    let mut out = g
-        .add(&filter::find("buffersink").unwrap(), "out", "")
-        .unwrap();
+    {
+        let enc_pix_fmt = match pix_fmt {
+            EncodePixelFormat::Sw(sw) => sw,
+            EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
+            EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
+        };
 
-    out.set_pixel_format(match pix_fmt {
-        EncodePixelFormat::Sw(sw) => sw,
-        EncodePixelFormat::Vaapi(_) => Pixel::VAAPI,
-        EncodePixelFormat::Vulkan(_) => Pixel::VULKAN,
-    });
+        #[cfg(ffmpeg_8_0)]
+        let buffersink_args = format!("pixel_formats={}", pixfmt_name(enc_pix_fmt));
+        #[cfg(not(ffmpeg_8_0))]
+        let buffersink_args = format!(
+            "pix_fmts={:08x}",
+            u32::from_be_bytes((AVPixelFormat::from(enc_pix_fmt) as u32).to_ne_bytes()) // flip endian on little-endian
+        );
 
-    let output_real_pixfmt_name = unsafe {
-        from_utf8_unchecked(
-            CStr::from_ptr(av_get_pix_fmt_name(
-                match pix_fmt {
-                    EncodePixelFormat::Vaapi(fmt) => fmt,
-                    EncodePixelFormat::Sw(fmt) => fmt,
-                    EncodePixelFormat::Vulkan(fmt) => fmt,
-                }
-                .into(),
-            ))
-            .to_bytes(),
+        g.add(
+            &filter::find("buffersink").unwrap(),
+            "out",
+            dbg!(&buffersink_args),
         )
-    };
+        .unwrap();
+    }
+
+    let underlying_output_pixfmt_name = pixfmt_name(match pix_fmt {
+        EncodePixelFormat::Vaapi(fmt) => fmt,
+        EncodePixelFormat::Sw(fmt) => fmt,
+        EncodePixelFormat::Vulkan(fmt) => fmt,
+    });
 
     let transpose_dir = match transform {
         Transform::_90 => Some("clock"),
@@ -2314,7 +2319,7 @@ fn video_filter(
             .input("out", 0)
             .unwrap()
             .parse(&format!(
-                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vulkan=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
+                "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vulkan=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
                 if let EncodePixelFormat::Vulkan(_) = pix_fmt {
                     ""
                 } else {
@@ -2331,7 +2336,7 @@ fn video_filter(
         .input("out", 0)
         .unwrap()
         .parse(&format!(
-            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={output_real_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
+            "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,scale_vaapi=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}{transpose_filter}{}",
             if let EncodePixelFormat::Vaapi(_) = pix_fmt {
                 ""
             } else {
@@ -2346,13 +2351,21 @@ fn video_filter(
     (g, Rational::new(1, 1_000_000_000))
 }
 
+fn pixfmt_name(p: Pixel) -> String {
+    unsafe {
+        let c_name = av_get_pix_fmt_name(p.into());
+        assert!(!c_name.is_null());
+        from_utf8(CStr::from_ptr(c_name).to_bytes())
+            .unwrap()
+            .to_string()
+    }
+}
+
 fn supported_formats(codec: &ffmpeg::Codec) -> Vec<Pixel> {
     unsafe {
         let mut frmts = Vec::new();
         let mut fmt_ptr = (*codec.as_ptr()).pix_fmts;
-        while !fmt_ptr.is_null() && *fmt_ptr as c_int != -1
-        /*AV_PIX_FMT_NONE */
-        {
+        while !fmt_ptr.is_null() && *fmt_ptr as c_int != -1 {
             frmts.push(Pixel::from(*fmt_ptr));
             fmt_ptr = fmt_ptr.add(1);
         }
