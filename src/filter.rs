@@ -82,7 +82,7 @@ pub fn video_filter(
         g.add(
             &ffmpeg::filter::find("buffersink").unwrap(),
             "out",
-            dbg!(&buffersink_args),
+            &buffersink_args,
         )
         .unwrap();
     }
@@ -114,11 +114,11 @@ pub fn video_filter(
     // however, there is a bug in ffmpeg that makes it required: https://trac.ffmpeg.org/ticket/10669
     // it is harmless to add though, so keep it as a workaround
     let filtergraph = format!(
-        "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1,{scale_filter},{transpose_filter}{}",
+        "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1{scale_filter}{transpose_filter}{}",
         if let EncodePixelFormat::Vaapi(_) = pix_fmt {
             ""
         } else {
-            ", hwdownload"
+            ",hwdownload"
         },
     );
 
@@ -151,9 +151,9 @@ fn scale_filterelem(
     });
 
     if vulkan {
-        format!("scale_vulkan=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
+        format!(",scale_vulkan=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
     } else {
-        format!("scale_vaapi=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
+        format!(",scale_vaapi=format={underlying_output_pixfmt_name}:w={enc_w}:h={enc_h}")
     }
 }
 
@@ -171,9 +171,9 @@ fn transform_filterelem(transform: Transform, vulkan: bool) -> String {
     transpose_dir
         .map(|transpose_dir| {
             if vulkan {
-                format!("transpose_vulkan=dir={transpose_dir}")
+                format!(",transpose_vulkan=dir={transpose_dir}")
             } else {
-                format!("transpose_vaapi=dir={transpose_dir}")
+                format!(",transpose_vaapi=dir={transpose_dir}")
             }
         })
         .unwrap_or_default()
