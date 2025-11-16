@@ -9,6 +9,7 @@ use ffmpeg_sys_next::{
     AVPixelFormat, av_buffersrc_parameters_alloc, av_buffersrc_parameters_set, av_free,
     av_get_pix_fmt_name, avfilter_graph_alloc_filter, avfilter_init_dict,
 };
+use log::info;
 use wayland_client::protocol::wl_output::Transform;
 
 use crate::{
@@ -115,10 +116,10 @@ pub fn video_filter(
     // it is harmless to add though, so keep it as a workaround
     let filtergraph = format!(
         "crop={roi_w}:{roi_h}:{roi_x}:{roi_y}:exact=1{scale_filter}{transpose_filter}{}",
-        if let EncodePixelFormat::Vaapi(_) = pix_fmt {
-            ""
-        } else {
+        if let EncodePixelFormat::Sw(_) = pix_fmt {
             ",hwdownload"
+        } else {
+            ""
         },
     );
 
@@ -128,6 +129,8 @@ pub fn video_filter(
         .unwrap()
         .parse(&filtergraph)
         .unwrap();
+
+    info!("{}", g.dump());
 
     g.validate().unwrap();
 

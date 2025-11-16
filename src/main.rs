@@ -1874,8 +1874,6 @@ impl EncState {
                 format!("Failed to create a vaapi frame context for encode surfaces of format {enc_pixfmt_av:?} {enc_w_screen_coord}x{enc_h_screen_coord}")
             })?;
 
-        info!("{}", video_filter.dump());
-
         let mut enc = make_video_params(
             args,
             enc_pixfmt,
