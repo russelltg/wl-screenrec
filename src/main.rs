@@ -935,6 +935,10 @@ impl<S: CaptureSource + 'static> State<S> {
             }
         }
 
+        if partial_outputs.is_empty() {
+            bail!("no wl-outputs found from the compositor, exiting");
+        }
+
         Ok((
             State {
                 in_flight_surface: InFlightSurface::None,
@@ -1497,6 +1501,7 @@ impl<S: CaptureSource + 'static> State<S> {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed to negotiate format: {e}");
+                self.errored = true;
                 return;
             }
         };
