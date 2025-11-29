@@ -1470,6 +1470,7 @@ impl<S: CaptureSource + 'static> State<S> {
             width: i32,
             height: i32,
             capture_formats: &[DmabufPotentialFormat],
+            require_linear: bool,
         ) -> anyhow::Result<DmabufFormat> {
             for preferred_format in [
                 DrmFourcc::Xrgb8888,
@@ -1478,8 +1479,7 @@ impl<S: CaptureSource + 'static> State<S> {
             ] {
                 let find = capture_formats.iter().find(|p| {
                     p.fourcc == preferred_format
-                        && (p.modifiers.contains(&DrmModifier::LINEAR)
-                            || p.modifiers.contains(&DrmModifier::INVALID)) // NVidia seems to only report INVALID & tiled formats, not LINEAR...
+                        && (!require_linear || p.modifiers.contains(&DrmModifier::LINEAR))
                 });
 
                 if let Some(find) = find {
@@ -1497,14 +1497,15 @@ impl<S: CaptureSource + 'static> State<S> {
             )
         }
 
-        let selected_format = match negotiate_format_impl(w as i32, h as i32, capture_formats) {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to negotiate format: {e}");
-                self.errored = true;
-                return;
-            }
-        };
+        let selected_format =
+            match negotiate_format_impl(w as i32, h as i32, capture_formats, !self.args.vulkan) {
+                Ok(f) => f,
+                Err(e) => {
+                    error!("Failed to negotiate format: {e}");
+                    self.errored = true;
+                    return;
+                }
+            };
 
         match mem::replace(&mut self.enc, EncConstructionStage::Intermediate) {
             EncConstructionStage::EverythingButFormat {
