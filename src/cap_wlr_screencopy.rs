@@ -20,7 +20,9 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State, WhatToCapture};
+use crate::{
+    CaptureSource, CopyFailReason, DmabufPotentialFormat, DrmModifier, State, WhatToCapture,
+};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(
@@ -78,7 +80,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
-                state.on_copy_fail(qhandle);
+                state.on_copy_fail(CopyFailReason::Unknown, qhandle);
             }
             _ => {}
         }
