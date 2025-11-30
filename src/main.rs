@@ -505,7 +505,6 @@ struct DrmModifier(u64);
 
 impl DrmModifier {
     const LINEAR: DrmModifier = DrmModifier(0);
-    const INVALID: DrmModifier = DrmModifier(0xffffffffffffff);
 }
 
 impl fmt::Debug for DrmModifier {
