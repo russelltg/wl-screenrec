@@ -13,13 +13,15 @@ use wayland_protocols::ext::{
         ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
     },
     image_copy_capture::v1::client::{
-        ext_image_copy_capture_frame_v1::ExtImageCopyCaptureFrameV1,
+        ext_image_copy_capture_frame_v1::{ExtImageCopyCaptureFrameV1, FailureReason},
         ext_image_copy_capture_manager_v1::{ExtImageCopyCaptureManagerV1, Options},
         ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
     },
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State, WhatToCapture};
+use crate::{
+    CaptureSource, CopyFailReason, DmabufPotentialFormat, DrmModifier, State, WhatToCapture,
+};
 
 impl Dispatch<ExtImageCopyCaptureManagerV1, ()> for State<CapExtImageCopy> {
     fn event(
@@ -129,7 +131,7 @@ impl Dispatch<ExtImageCopyCaptureSessionV1, ()> for State<CapExtImageCopy> {
                 );
             }
             ext_image_copy_capture_session_v1::Event::Stopped => {
-                state.on_copy_fail(qhandle); // untested if this actually works
+                state.on_copy_fail(CopyFailReason::Stopped, qhandle); // untested if this actually works
             }
             _ => {}
         }
@@ -160,7 +162,15 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State<CapExtImageCopy> {
             }
             Event::Failed { reason } => {
                 debug!("frame copy failed: {reason:?}");
-                state.on_copy_fail(qhandle);
+                state.on_copy_fail(
+                    match reason {
+                        wayland_client::WEnum::Value(FailureReason::Stopped) => {
+                            CopyFailReason::Stopped
+                        }
+                        _ => CopyFailReason::Unknown,
+                    },
+                    qhandle,
+                );
             }
             _ => todo!(),
         }

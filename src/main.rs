@@ -298,6 +298,12 @@ impl From<WhatToEncode> for WhatToCapture {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum CopyFailReason {
+    Unknown,
+    Stopped,
+}
+
 trait CaptureSource: Sized {
     type Frame: Clone;
 
@@ -652,6 +658,7 @@ struct State<S: CaptureSource> {
     starting_timestamp: Option<i64>,
     args: Args,
     errored: bool,
+    stopped: bool,
     gm: GlobalList,
     xdg_output_manager: ZxdgOutputManagerV1,
     toplevels: HashMap<ObjectId, ToplevelInfo>,
@@ -1098,6 +1105,7 @@ impl<S: CaptureSource + 'static> State<S> {
                 starting_timestamp: None,
                 args,
                 errored: false,
+                stopped: false,
                 gm,
                 xdg_output_manager,
                 toplevels: HashMap::new(),
@@ -1584,7 +1592,7 @@ impl<S: CaptureSource + 'static> State<S> {
         self.queue_alloc_frame(qhandle);
     }
 
-    fn on_copy_fail(&mut self, qhandle: &QueueHandle<Self>) {
+    fn on_copy_fail(&mut self, reason: CopyFailReason, qhandle: &QueueHandle<Self>) {
         let CompleteState {
             output_went_away,
             cap,
@@ -1602,8 +1610,6 @@ impl<S: CaptureSource + 'static> State<S> {
             cap.on_done_with_frame(wl_frame);
             wl_buffer.destroy();
             drop(av_surface);
-        } else {
-            panic!("on_copy_fail called in strange state");
         }
         if enc.format_change {
             enc.format_change = false;
@@ -1612,6 +1618,11 @@ impl<S: CaptureSource + 'static> State<S> {
             );
 
             self.queue_alloc_frame(qhandle);
+            return;
+        }
+
+        if reason == CopyFailReason::Stopped {
+            self.stopped = true;
             return;
         }
 
@@ -2633,6 +2644,9 @@ fn execute<S: CaptureSource + 'static>(args: Args, conn: Connection) {
 
         if state.errored {
             break EXIT_FAILURE;
+        }
+        if state.stopped {
+            break EXIT_SUCCESS;
         }
     };
     if let EncConstructionStage::Complete(c) = &mut state.enc {
