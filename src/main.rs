@@ -476,7 +476,7 @@ impl OutputInfo {
     }
 
     fn fractional_scale(&self) -> f64 {
-        f64::from(self.size_pixels.0) / f64::from(self.logical_size.0)
+        f64::from(self.size_screen_space().0) / f64::from(self.logical_size.0)
     }
 
     fn size_screen_space(&self) -> (i32, i32) {
