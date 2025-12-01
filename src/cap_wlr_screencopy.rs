@@ -20,7 +20,9 @@ use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
 };
 
-use crate::{CaptureSource, DmabufPotentialFormat, DrmModifier, State};
+use crate::{
+    CaptureSource, CopyFailReason, DmabufPotentialFormat, DrmModifier, State, WhatToCapture,
+};
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for State<CapWlrScreencopy> {
     fn event(
@@ -78,7 +80,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State<CapWlrScreencopy> {
             zwlr_screencopy_frame_v1::Event::Buffer { .. } => {}
             zwlr_screencopy_frame_v1::Event::Flags { .. } => {}
             zwlr_screencopy_frame_v1::Event::Failed => {
-                state.on_copy_fail(qhandle);
+                state.on_copy_fail(CopyFailReason::Unknown, qhandle);
             }
             _ => {}
         }
@@ -118,7 +120,7 @@ impl CaptureSource for CapWlrScreencopy {
     fn new(
         gm: &GlobalList,
         eq: &QueueHandle<State<Self>>,
-        output: WlOutput,
+        output: WhatToCapture,
     ) -> anyhow::Result<Self> {
         let man: ZwlrScreencopyManagerV1 = gm
             .bind(eq, 3..=ZwlrScreencopyManagerV1::interface().version, ()).context("your compositor does not support zwlr-screencopy-manager and therefore is not support by wl-screenrec. See the README for supported compositors")?;
@@ -127,6 +129,13 @@ impl CaptureSource for CapWlrScreencopy {
             .bind(eq, 4..=ZwpLinuxDmabufV1::interface().version, ())
             .context("your compositor does not support zwp-linux-dmabuf and therefore is not support by wl-screenrec. See the README for supported compositors")?;
         dma.get_default_feedback(eq, ());
+
+        let output = match output {
+            WhatToCapture::Output(wl_output) => wl_output,
+            WhatToCapture::Toplevel(_) => {
+                panic!("wlr-screencopy does not support toplevel capture")
+            }
+        };
 
         Ok(Self {
             screencopy_manager: man,
