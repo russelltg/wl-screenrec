@@ -1647,7 +1647,14 @@ fn make_video_params(
     enc.set_width(encode_w as u32);
     enc.set_height(encode_h as u32);
     enc.set_time_base(Rational(1, 1_000_000_000));
-    enc.set_frame_rate(Some(framerate));
+
+    let encoder_framerate = if let Some(max_fps) = args.max_fps {
+        Rational(max_fps as i32, 1)
+    } else {
+        framerate
+    };
+    enc.set_frame_rate(Some(encoder_framerate));
+    
     if let Some(gop) = args.gop_size {
         enc.set_gop(gop);
     }
