@@ -1649,13 +1649,8 @@ fn make_video_params(
     enc.set_time_base(Rational(1, 1_000_000_000));
 
     let encoder_framerate = if let Some(max_fps) = args.max_fps {
-        let scaled = max_fps * 1000.0;
-        let numerator = scaled as i32;
-        let max_fps_rational = Rational(numerator, 1000);
-        let framerate_value = framerate.numerator() as f64 / framerate.denominator() as f64;
-        let max_fps_value = max_fps_rational.numerator() as f64 / max_fps_rational.denominator() as f64;
-        
-        if max_fps_value < framerate_value {
+        let max_fps_rational = Rational::from(max_fps);
+        if max_fps_rational < framerate {
             max_fps_rational
         } else {
             framerate
