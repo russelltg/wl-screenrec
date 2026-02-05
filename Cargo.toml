@@ -46,6 +46,8 @@ signal-hook-mio = { version = "0.2.4", features = ["support-v1_0"] }
 [patch.crates-io]
 # Waiting on https://github.com/zmwangx/rust-ffmpeg-sys/pull/91
 ffmpeg-sys-next = { git = "https://github.com/russelltg/rust-ffmpeg-sys", branch = "vulkan" }
+# Waiting on https://github.com/zmwangx/rust-ffmpeg/pull/247
+ffmpeg-next = { git = "https://github.com/sevenc-nanashi/rust-ffmpeg", branch = "feat/8.0-fix" }
 
 # Uncomment for local dev
 # ffmpeg-next = { path = "../rust-ffmpeg" }
