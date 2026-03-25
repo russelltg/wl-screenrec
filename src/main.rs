@@ -20,7 +20,7 @@ use anyhow::{Context, anyhow, bail, format_err};
 use audio::AudioHandle;
 use cap_ext_image_copy::CapExtImageCopy;
 use cap_wlr_screencopy::CapWlrScreencopy;
-use clap::{ArgAction, CommandFactory, Parser, command};
+use clap::{ArgAction, CommandFactory, Parser};
 use drm::buffer::DrmFourcc;
 use ffmpeg::{
     Packet, Rational, codec, dict, dictionary, encoder,
