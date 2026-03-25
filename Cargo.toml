@@ -37,11 +37,11 @@ simplelog = "0.12.1"
 log = "0.4.21"
 clap_complete = "4.5.8"
 log-once = "0.4.1"
-drm = "0.14.0"
+drm = "0.15.0"
 ash = { version = "0.38.0", optional = true }
 mio = { version = "1.0.4", features = ["os-poll"] }
-signal-hook = "0.3.15"
-signal-hook-mio = { version = "0.2.4", features = ["support-v1_0"] }
+signal-hook = "0.4.3"
+signal-hook-mio = { version = "0.3.0", features = ["support-v1_0"] }
 
 [patch.crates-io]
 # Waiting on https://github.com/zmwangx/rust-ffmpeg-sys/pull/91
@@ -52,7 +52,7 @@ ffmpeg-sys-next = { git = "https://github.com/russelltg/rust-ffmpeg-sys", branch
 # ffmpeg-sys-next = { path = "../rust-ffmpeg-sys" }
 
 [dev-dependencies]
-nix = { version = "0.30.0", default-features = false, features = [
+nix = { version = "0.31.2", default-features = false, features = [
     "signal",
     "process",
 ] }
